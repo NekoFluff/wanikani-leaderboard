@@ -409,6 +409,7 @@
             totalBurnPercentage: 0,
             levelDelta: null,
             burnDelta: null,
+            srsTotalDelta: null,
         };
     }
 
@@ -493,6 +494,7 @@
         //snapshot of the last refresh, so we can show "change since last refresh" badges below
         const previousLevel = item.level;
         const previousBurnPercentage = item.totalBurnPercentage;
+        const previousSrsTotal = srsStageTotal(item);
         const hadPriorData = item.wasUserFound;
 
         let xmlhttp;
@@ -589,6 +591,7 @@
         //change since the last refresh, shown as small delta badges (null hides the badge, e.g. on first fetch)
         item.levelDelta = (hadPriorData && userFound) ? (userLevel - Number(previousLevel)) : null;
         item.burnDelta = (hadPriorData && userFound) ? Math.round((item.totalBurnPercentage - previousBurnPercentage) * 100) / 100 : null;
+        item.srsTotalDelta = (hadPriorData && userFound) ? (srsStageTotal(item) - previousSrsTotal) : null;
     }
 
     function showLevelUps() {
@@ -1133,9 +1136,15 @@
         }
 
         #leaderboard .leaderboard-srs-row-total {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 4px;
             flex: 0 0 auto;
-            width: 40px;
-            text-align: right;
+            min-width: 40px;
+        }
+
+        #leaderboard .leaderboard-srs-row-total-value {
             font-size: 0.78em;
             opacity: 0.55;
         }
@@ -1684,7 +1693,10 @@
                 <div class="leaderboard-srs-row-bar-track">
                     <div class="leaderboard-srs-row-bar" style="width:${barWidthPct}%">${segmentsHtml}</div>
                 </div>
-                <div class="leaderboard-srs-row-total">${total}</div>
+                <div class="leaderboard-srs-row-total">
+                    <span class="leaderboard-srs-row-total-value">${total}</span>
+                    ${deltaBadgeHtml(user.srsTotalDelta, '')}
+                </div>
             </div>`;
         }).join('');
 
