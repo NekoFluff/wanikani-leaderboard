@@ -706,10 +706,14 @@
             margin-bottom: 16px;
         }
 
-        /* Font-size/weight/color come from WK's own .small-caps class, matching every other
-           card title exactly instead of approximating it. */
+        /* WK's own .small-caps class actually renders at 16px/weight 350 here, not the
+           18px/700 bold every other card title uses (confirmed via computed styles, not
+           assumed) -- so unlike most of this stylesheet, we can't just inherit it. */
         #leaderboard h3.small-caps {
-            margin: 0;
+            margin: 0 !important;
+            font-size: 18px !important;
+            font-weight: 700 !important;
+            color: #333 !important;
         }
 
         #leaderboard .leaderboard-toolbar {
