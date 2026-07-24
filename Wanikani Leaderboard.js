@@ -28,8 +28,9 @@
         return;
     }
 
-    wkof.include('Menu');
+    wkof.include('Menu,ItemData');
     wkof.ready('Menu').then(install_menu);
+    wkof.ready('ItemData').then(loadTotalItemCount);
 
     //------------------------------
     // Menu
@@ -42,6 +43,24 @@
             submenu: 'Settings',
             title: 'Leaderboard',
             on_click: open_settings
+        });
+    }
+
+    //------------------------------
+    // Item count
+    //------------------------------
+
+    //fetch the live count of non-hidden WK subjects (radicals/kanji/vocabulary) across every
+    //level, so burn%/seen% track WK's actual catalog instead of a hardcoded number that goes
+    //stale whenever WK adds content. override_max_level bypasses the current user's own
+    //subscription cap so the count always covers all 60 levels, not just what they've paid for.
+    function loadTotalItemCount() {
+        wkof.user.override_max_level = 60;
+        wkof.ItemData.get_items().then(function (items) {
+            if (items.length > 0) {
+                totalNumberOfWKItems = items.length;
+                createLeaderboard();
+            }
         });
     }
 
@@ -285,16 +304,13 @@
     //given a generated hue -- the trend chart simply caps at these 8.
     const trendChartPalette = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
 
-    //admin accounts, admin is any account with the Leader badge or a unique flair on the forums (list may be incomplete; users with no wk account like 'WaniMeKani' or 'system' are omitted)
-    const adminNamesInfinity = ['viet', 'viet', 'Kristen', 'kristen', 'koichi', 'sam', 'oldbonsai', 'arpit.jalan', 'arpit', 'jenk', 'WaniKaniJavi', 'wanikanijavi', 'gomakuma'];//∞
-    const adminNamesStar = ['TofuguKanae', 'tofugukanae', 'CyrusS', 'cyruss', 'mamimumason', 'a-regular-durtle', 'koichi-descended', 'RachelG', 'rachelg', 'arlo', 'camfugu', 'TofuguJenny', 'tofugujenny'];//★
-    const adminNamesNone = ['dax', 'HAWK', 'hawk', 'blake.erickson', 'blake', 'CidPollendina', 'cidpollendina', 'Aya', 'aya', 'mamimumason'];//none
-
-    const adminIdentifier = 'adminUserLeaderboard';
     const accountNotFoundMessage = ' (Not Found)';
 
-    //total number of WaniKani items
-    const totalNumberOfWKItems = 8910;
+    //total number of WaniKani items (radicals + kanji + vocabulary). Refined via wkof.ItemData
+    //once it loads (see loadTotalItemCount) so this tracks WK's real catalog instead of going
+    //stale whenever WK adds content; this fallback only covers the brief window before that
+    //resolves, or if it fails.
+    let totalNumberOfWKItems = 8910;
 
     var usersThatLeveledUp = '';
 
@@ -883,7 +899,7 @@
         }
 
         #leaderboard .leaderboard-user-name {
-            flex: 1;
+            flex: 0 1 auto;
             min-width: 0;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -892,7 +908,6 @@
 
         #leaderboard .leaderboard-level-badge {
             flex: none;
-            margin-left: auto;
             padding: 2px 7px;
             border-radius: 999px;
             font-size: 0.75em;
@@ -1637,39 +1652,6 @@
         }
     }
 
-    //see if account is an admin account
-    function isAdmin(name) {
-        if (adminNamesInfinity.indexOf(name) !== -1) {
-            return 'sym-∞ ' + adminIdentifier;
-        } else if (adminNamesStar.indexOf(name) !== -1) {
-            return 'sym-★ ' + adminIdentifier;
-        } else if (adminNamesNone.indexOf(name) !== -1) {
-            return 'sym- ' + adminIdentifier;
-        }
-        return '';//not an admin account
-    }
-
-    //change admin level badge to show ∞ or ★ on hover, restore the level number on hover-out
-    function adminHovering() {
-        const adminUsers = document.querySelectorAll(".adminUserLeaderboard");
-        adminUsers.forEach(element => {
-            const levelBadge = element.querySelector('.leaderboard-level-badge');
-            if (!levelBadge) return;
-
-            let hoverSymbol = '';
-            const symType = element.className.substring(0, 5);
-            if (symType === 'sym-∞') { hoverSymbol = '∞'; }
-            else if (symType === 'sym-★') { hoverSymbol = '★'; }
-
-            element.addEventListener('mouseenter', function () {
-                levelBadge.textContent = hoverSymbol;
-            });
-            element.addEventListener('mouseleave', function () {
-                levelBadge.textContent = levelBadge.dataset.level;
-            });
-        });
-    }
-
     //small inline icon shown next to a username for a level-up or a 100% burn
     function achievementIconHtml(item) {
         if (item.hasLeveledUp) {
@@ -1951,7 +1933,6 @@
             let rowsHtml = '';
             for (let j = startIndex; j < endIndex; j++) {
                 const user = usersInfoList[j];
-                const adminClass = isAdmin(user.name);
                 const userErrorNotFoundMessage = user.wasUserFound ? '' : accountNotFoundMessage;
                 const displayName = escapeHtml(user.name + userErrorNotFoundMessage);
                 const profileHref = encodeURIComponent(user.name);
@@ -1973,7 +1954,7 @@
                         <img src="${escapeHtml(user.avatar_link)}"/>
                     </td>
                     <td class="leaderboard-col-user">
-                        <a href="users/${profileHref}" target="_blank" class="leaderboard-user-link ${adminClass}">
+                        <a href="users/${profileHref}" target="_blank" class="leaderboard-user-link">
                             <span class="leaderboard-user-name leaderboardSpan">${displayName}</span>
                             ${achievementIconHtml(user)}
                             <span class="leaderboard-level-badge" data-level="${user.level}">${user.level}</span>
@@ -2123,8 +2104,6 @@
         leaderboardDeleteBtns.forEach(element => {
             element.addEventListener('click', deleteUser);
         });
-
-        adminHovering();
     }
 
     startup();
