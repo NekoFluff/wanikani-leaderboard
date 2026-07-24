@@ -923,6 +923,38 @@
             color: #c62828;
         }
 
+        /* Seen (any SRS stage) count */
+        #leaderboard td.leaderboard-col-seen {
+            width: 128px;
+        }
+
+        #leaderboard .leaderboard-seen-track {
+            position: relative;
+            height: 6px;
+            margin-bottom: 3px;
+            border-radius: 999px;
+            background: var(--lb-track);
+            overflow: hidden;
+        }
+
+        #leaderboard .leaderboard-seen-fill {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #7a4bda, #a688e8);
+        }
+
+        #leaderboard .leaderboard-seen-value {
+            font-size: 0.72em;
+            opacity: 0.55;
+        }
+
+        #leaderboard .leaderboard-col-seen .leaderboard-delta {
+            margin-left: 4px;
+        }
+
         /* Burn progress */
         #leaderboard td.leaderboard-col-burn {
             width: 128px;
@@ -1281,6 +1313,8 @@
 
         /* Narrow screens: drop the burn column, keep the essentials readable */
         @media (max-width: 560px) {
+            #leaderboard th.leaderboard-col-seen,
+            #leaderboard td.leaderboard-col-seen,
             #leaderboard th.leaderboard-col-burn,
             #leaderboard td.leaderboard-col-burn {
                 display: none;
@@ -1926,6 +1960,10 @@
                     ? `Total burned: ${user.srs_distribution[0].burnTotal} (${user.totalBurnPercentage}%)`
                     : 'Users without a subscription show as level 3';
 
+                const seenTotal = srsStageTotal(user);
+                const seenPercentage = Math.round((seenTotal / totalNumberOfWKItems) * 100 * 100) / 100;
+                const seenTooltip = `Seen (any SRS stage): ${seenTotal} / ${totalNumberOfWKItems} (${seenPercentage}%)`;
+
                 rowsHtml += `<tr>
                     <td class="leaderboard-col-rank" title="${escapeHtml(wkRealmNames[user.realm_number])}">
                         <span class="leaderboard-rank-num">#${j + 1}</span>
@@ -1941,6 +1979,11 @@
                             <span class="leaderboard-level-badge" data-level="${user.level}">${user.level}</span>
                             ${deltaBadgeHtml(user.levelDelta, '')}
                         </a>
+                    </td>
+                    <td class="leaderboard-col-seen" title="${escapeHtml(seenTooltip)}">
+                        <div class="leaderboard-seen-track"><div class="leaderboard-seen-fill" style="width:${Math.min(seenPercentage, 100)}%"></div></div>
+                        <span class="leaderboard-seen-value">${seenTotal} seen</span>
+                        ${deltaBadgeHtml(user.srsTotalDelta, '')}
                     </td>
                     <td class="leaderboard-col-burn" title="${escapeHtml(burnTooltip)}">
                         <div class="leaderboard-burn-track"><div class="leaderboard-burn-fill" style="width:${Math.min(user.totalBurnPercentage, 100)}%"></div></div>
@@ -1975,6 +2018,7 @@
                             <th class="leaderboard-col-rank">Rank</th>
                             <th></th>
                             <th>User</th>
+                            <th class="leaderboard-col-seen">Seen</th>
                             <th class="leaderboard-col-burn">Burn</th>
                             <th class="leaderboard-col-actions"></th>
                         </tr>
