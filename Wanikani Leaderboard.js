@@ -137,7 +137,7 @@
             const chosenSortOrder = settingsSortOrderSelect.value;
             if (chosenSortOrder !== userSortingMethod) {
                 userSortingMethod = chosenSortOrder;
-                saveToCache('leaderboard_sortingMethod', userSortingMethod);
+                saveToCache(CACHE_KEY_SORTING_METHOD, userSortingMethod);
                 inference();
             }
 
@@ -216,9 +216,23 @@
     var userSortingMethod = 'key1';
     var showChartsPanel = false;//whether the charts panel is expanded
     var activeChartTab = 'srsStages';//'srsStages' | 'seenTrend' | 'burnTrend' | 'levelTrend' -- which chart tab is showing
-    var progressHistory = {};//{ [username]: [{date:'YYYY-MM-DD', level, burnPercentage, seenPercentage}, ...] }, oldest first
+    //raw per-stage counts, not percentages, are stored -- burn%/seen% are derived at render time
+    //against the current totalNumberOfWKItems (see percentOf), so historical points stay consistent
+    //with today's catalog size instead of being frozen at whatever total existed when recorded, and
+    //"seen" is just the sum of all five stages rather than its own separately-tracked field
+    var progressHistory = {};//{ [username]: [{date:'YYYY-MM-DD', level, appr, guru, master, enlight, burn}, ...] }, oldest first
 
-    //generic cache helpers used for every simple leaderboard_* setting below
+    //cache keys, namespaced under wkof.settings.* so wkof's file_cache never sweeps them for
+    //inactivity -- its cleanup only exempts keys matching that prefix (see file_cache_cleanup in
+    //wkof's Core.js), and everything else gets purged after 14 days without a page load
+    const CACHE_KEY_USER_LIST = 'wkof.settings.leaderboard_userList';
+    const CACHE_KEY_SORTING_METHOD = 'wkof.settings.leaderboard_sortingMethod';
+    const CACHE_KEY_HISTORY = 'wkof.settings.leaderboard_history';
+    const CACHE_KEY_CHARTS_OPEN = 'wkof.settings.leaderboard_chartsOpen';
+    const CACHE_KEY_ACTIVE_CHART_TAB = 'wkof.settings.leaderboard_activeChartTab';
+    const CACHE_KEY_TIME_SINCE_LAST_REFRESH = 'wkof.settings.leaderboard_timeSinceLastRefresh';
+
+    //generic cache helpers used for every simple setting below
     function saveToCache(key, value) {
         wkof.file_cache.save(key, value);
     }
@@ -245,7 +259,9 @@
         usersInfoList.forEach(function (user) {
             if (!user.wasUserFound) { return; }
             const entries = progressHistory[user.name] || (progressHistory[user.name] = []);
-            const snapshot = { date: dateKey, level: user.level, burnPercentage: user.totalBurnPercentage, seenPercentage: seenPercentageFor(user) };
+            const dist = user.srs_distribution[0] || {};
+            const snapshot = { date: dateKey, level: user.level };
+            srsStages.forEach(function (stage) { snapshot[stage.key] = dist[stage.key + 'Total'] || 0; });
             const lastEntry = entries[entries.length - 1];
             if (lastEntry && lastEntry.date === dateKey) {
                 entries[entries.length - 1] = snapshot;
@@ -253,16 +269,16 @@
                 entries.push(snapshot);
             }
         });
-        saveToCache('leaderboard_history', progressHistory);
+        saveToCache(CACHE_KEY_HISTORY, progressHistory);
     }
 
     //refresh time
     function getTimeSinceLastRefreshFromCache() {
         return new Promise((resolve) => {
-            wkof.file_cache.load('leaderboard_timeSinceLastRefresh').then(function (settings) {
+            wkof.file_cache.load(CACHE_KEY_TIME_SINCE_LAST_REFRESH).then(function (settings) {
                 resolve(settings);
             }).catch(e => {
-                wkof.file_cache.save('leaderboard_timeSinceLastRefresh', Date.now()).then(function () {
+                wkof.file_cache.save(CACHE_KEY_TIME_SINCE_LAST_REFRESH, Date.now()).then(function () {
                 }).catch(e => {
                     console.log(e);
                 });
@@ -273,7 +289,7 @@
     }
 
     function refreshDashboard() {
-        wkof.file_cache.save('leaderboard_timeSinceLastRefresh', Date.now()).then(function () {
+        wkof.file_cache.save(CACHE_KEY_TIME_SINCE_LAST_REFRESH, Date.now()).then(function () {
         }).catch(e => {
             console.log(e);
         });
@@ -454,11 +470,11 @@
                 usersInfoList.splice(i, 1);
             }
         }
-        saveToCache('leaderboard_userList', usersInfoList);
+        saveToCache(CACHE_KEY_USER_LIST, usersInfoList);
 
         //if list empty reset refresh time to zero
         if (usersInfoList.length === 0) {
-            wkof.file_cache.delete(/^leaderboard_/);
+            wkof.file_cache.delete(/^wkof\.settings\.leaderboard_/);
             refreshDashboard();
         };
 
@@ -492,7 +508,7 @@
     //for sorting and saving userlist to cache
     function inference() {
         usersInfoList.sort(sortComparators[userSortingMethod]);
-        saveToCache('leaderboard_userList', usersInfoList);//save sorting result and any added users
+        saveToCache(CACHE_KEY_USER_LIST, usersInfoList);//save sorting result and any added users
         createLeaderboard();//renew html
     }
 
@@ -602,7 +618,7 @@
         item.srs_distribution = srsCountsLabeled;//assign SRS stats
         item.hasLeveledUp = hasUserLeveledUp;//whether or not user leveled up since last refresh
         item.wasUserFound = userFound;//whether the user name yielded result in the past (is used to detect name changes or deletion of account)
-        item.totalBurnPercentage = Math.round((srsCountsLabeled[0].burnTotal / totalNumberOfWKItems * 100) * 100) / 100;
+        item.totalBurnPercentage = percentOf(srsCountsLabeled[0].burnTotal, totalNumberOfWKItems);
 
         //change since the last refresh, shown as small delta badges (null hides the badge, e.g. on first fetch)
         item.levelDelta = (hadPriorData && userFound) ? (userLevel - Number(previousLevel)) : null;
@@ -639,27 +655,28 @@
         getTimeSinceLastRefreshFromCache().then(function (result) {
             timeSinceLastRefresh = result;
             updateTimeSinceRefreshText();
+            createLeaderboard();
         });
 
-        loadFromCache('leaderboard_sortingMethod', 'key1').then(function (result) {
+        loadFromCache(CACHE_KEY_SORTING_METHOD, 'key1').then(function (result) {
             userSortingMethod = result;
         });
 
-        loadFromCache('leaderboard_history', {}).then(function (result) {
+        loadFromCache(CACHE_KEY_HISTORY, {}).then(function (result) {
             progressHistory = result || {};
         });
 
-        loadFromCache('leaderboard_chartsOpen', false).then(function (result) {
+        loadFromCache(CACHE_KEY_CHARTS_OPEN, false).then(function (result) {
             showChartsPanel = result;
             createLeaderboard();
         });
 
-        loadFromCache('leaderboard_activeChartTab', 'srsStages').then(function (result) {
+        loadFromCache(CACHE_KEY_ACTIVE_CHART_TAB, 'srsStages').then(function (result) {
             activeChartTab = result;
             createLeaderboard();
         });
 
-        loadFromCache('leaderboard_userList', undefined).then(function (result) {
+        loadFromCache(CACHE_KEY_USER_LIST, undefined).then(function (result) {
             if (result != undefined) {
                 usersInfoList = result;
                 createLeaderboard();
@@ -1677,9 +1694,22 @@
         return srsStages.reduce(function (sum, stage) { return sum + (dist[stage.key + 'Total'] || 0); }, 0);
     }
 
+    //same idea as srsStageTotal, but for a stored history snapshot (which keys its per-stage counts
+    //as appr/guru/master/enlight/burn, not apprTotal/guruTotal/...). Returns undefined for an
+    //older-format entry that never recorded per-stage counts, so callers can treat it as a gap.
+    function seenTotalFromHistoryEntry(entry) {
+        if (typeof entry.appr !== 'number') { return undefined; }
+        return srsStages.reduce(function (sum, stage) { return sum + (entry[stage.key] || 0); }, 0);
+    }
+
+    //rounds a count/total ratio to a 2-decimal percentage, consistent everywhere burn%/seen% is shown
+    function percentOf(count, total) {
+        return Math.round((count / total) * 100 * 100) / 100;
+    }
+
     //% of all WK items a user has seen (any SRS stage), for the Seen column bar and trend chart
     function seenPercentageFor(user) {
-        return Math.round((srsStageTotal(user) / totalNumberOfWKItems) * 100 * 100) / 100;
+        return percentOf(srsStageTotal(user), totalNumberOfWKItems);
     }
 
     //horizontal stacked-bar chart comparing everyone's Apprentice/Guru/Master/Enlightened/Burned
@@ -1750,8 +1780,11 @@
 
     //generic line-over-time chart, one line per user (see usersForTrendChart), built from the
     //daily snapshots recordProgressHistory() has been collecting. Seen%, Burn%, and Level are
-    //all just this with a different metric/scale -- see the wrappers below.
-    function buildLineTrendChartHtml(metricKey, yMax, yGridlineValues, formatValue, emptyMessage) {
+    //all just this with a different metric/scale -- see the wrappers below. valueFor(entry) pulls
+    //the plotted number out of a snapshot (and derives percentages from stored raw counts where
+    //needed); it should return undefined/non-number for a snapshot that can't supply this metric,
+    //which the chart treats as a gap rather than plotting a bogus point.
+    function buildLineTrendChartHtml(valueFor, yMax, yGridlineValues, formatValue, emptyMessage) {
         const trackedUsers = usersForTrendChart();
         const allDates = Array.from(new Set(
             trackedUsers.reduce(function (acc, user) {
@@ -1787,12 +1820,13 @@
         const series = trackedUsers.map(function (user, index) {
             const color = trendChartPalette[index % trendChartPalette.length];
             const byDate = {};
-            (progressHistory[user.name] || []).forEach(function (entry) { byDate[entry.date] = entry[metricKey]; });
+            (progressHistory[user.name] || []).forEach(function (entry) { byDate[entry.date] = valueFor(entry); });
 
             const points = [];
             dates.forEach(function (date, i) {
-                if (Object.prototype.hasOwnProperty.call(byDate, date)) {
-                    points.push({ x: xFor(i), y: yFor(byDate[date]), date: date, value: byDate[date] });
+                const value = byDate[date];
+                if (typeof value === 'number' && !isNaN(value)) {
+                    points.push({ x: xFor(i), y: yFor(value), date: date, value: value });
                 }
             });
             return { name: user.name, color: color, points: points };
@@ -1830,15 +1864,27 @@
     const trendNoHistoryMessage = 'Come back after a couple more refreshes on different days — the trend chart needs at least two days of history to draw a line.';
 
     function buildBurnTrendChartHtml() {
-        return buildLineTrendChartHtml('burnPercentage', 100, [0, 25, 50, 75, 100], function (v) { return v + '%'; }, trendNoHistoryMessage);
+        return buildLineTrendChartHtml(
+            function (entry) { return typeof entry.burn === 'number' ? percentOf(entry.burn, totalNumberOfWKItems) : undefined; },
+            100, [0, 25, 50, 75, 100], function (v) { return v + '%'; }, trendNoHistoryMessage
+        );
     }
 
     function buildLevelTrendChartHtml() {
-        return buildLineTrendChartHtml('level', 60, [0, 15, 30, 45, 60], function (v) { return String(v); }, trendNoHistoryMessage);
+        return buildLineTrendChartHtml(
+            function (entry) { return entry.level; },
+            60, [0, 15, 30, 45, 60], function (v) { return String(v); }, trendNoHistoryMessage
+        );
     }
 
     function buildSeenTrendChartHtml() {
-        return buildLineTrendChartHtml('seenPercentage', 100, [0, 25, 50, 75, 100], function (v) { return v + '%'; }, trendNoHistoryMessage);
+        return buildLineTrendChartHtml(
+            function (entry) {
+                const total = seenTotalFromHistoryEntry(entry);
+                return typeof total === 'number' ? percentOf(total, totalNumberOfWKItems) : undefined;
+            },
+            100, [0, 25, 50, 75, 100], function (v) { return v + '%'; }, trendNoHistoryMessage
+        );
     }
 
     //vertical crosshair that snaps to the nearest date + a tooltip listing every user's
@@ -1994,7 +2040,6 @@
         let timeSinceLastRefreshHtml = '';
 
         if (usersInfoList.length === 0) {
-            timeSinceLastRefreshText = '0 days 0 hours 0 minutes';
             contentHtml = `<div class="leaderboard-empty">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
                 <div>You haven't added any users yet.</div>
@@ -2084,14 +2129,14 @@
         const chartsToggleBtn = document.querySelector('#leaderboard .leaderboard-charts-toggle');
         if (chartsToggleBtn) chartsToggleBtn.addEventListener('click', function () {
             showChartsPanel = !showChartsPanel;
-            saveToCache('leaderboard_chartsOpen', showChartsPanel);
+            saveToCache(CACHE_KEY_CHARTS_OPEN, showChartsPanel);
             createLeaderboard();
         });
 
         document.querySelectorAll('#leaderboard .leaderboard-chart-tab').forEach(function (tabBtn) {
             tabBtn.addEventListener('click', function () {
                 activeChartTab = tabBtn.dataset.chartTab;
-                saveToCache('leaderboard_activeChartTab', activeChartTab);
+                saveToCache(CACHE_KEY_ACTIVE_CHART_TAB, activeChartTab);
                 createLeaderboard();
             });
         });
