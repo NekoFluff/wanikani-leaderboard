@@ -195,7 +195,9 @@
     //userlist
     var usersInfoList = [];
     var userSortingMethod = 'key1';
-    var showSrsChart = false;//whether the SRS stage comparison chart is expanded
+    var showChartsPanel = false;//whether the charts panel is expanded
+    var activeChartTab = 'srsStages';//'srsStages' | 'burnTrend' -- which chart tab is showing
+    var progressHistory = {};//{ [username]: [{date:'YYYY-MM-DD', level, burnPercentage}, ...] }, oldest first
 
     //generic cache helpers used for every simple leaderboard_* setting below
     function saveToCache(key, value) {
@@ -204,6 +206,35 @@
 
     function loadFromCache(key, fallback) {
         return wkof.file_cache.load(key).catch(function () { return fallback; });
+    }
+
+    //today's date as a local YYYY-MM-DD key (not toISOString, which is UTC and can
+    //land on the wrong side of midnight for the user's actual calendar day)
+    function todayDateKey() {
+        const now = new Date();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        return `${now.getFullYear()}-${month}-${day}`;
+    }
+
+    //records one snapshot per user per calendar day (refreshing multiple times in
+    //the same day overwrites that day's entry rather than adding duplicates), so
+    //the trend chart has something to plot without needing a separate history file.
+    //Skipped for users a fetch couldn't find, so a bad lookup doesn't pollute the trend.
+    function recordProgressHistory() {
+        const dateKey = todayDateKey();
+        usersInfoList.forEach(function (user) {
+            if (!user.wasUserFound) { return; }
+            const entries = progressHistory[user.name] || (progressHistory[user.name] = []);
+            const snapshot = { date: dateKey, level: user.level, burnPercentage: user.totalBurnPercentage };
+            const lastEntry = entries[entries.length - 1];
+            if (lastEntry && lastEntry.date === dateKey) {
+                entries[entries.length - 1] = snapshot;
+            } else {
+                entries.push(snapshot);
+            }
+        });
+        saveToCache('leaderboard_history', progressHistory);
     }
 
     //refresh time
@@ -247,6 +278,12 @@
         { key: 'enlight', label: 'Enlightened', colorClass: 'enlightenedColor' },
         { key: 'burn', label: 'Burned', colorClass: 'burnedColor' },
     ];
+
+    //validated categorical palette (blue/orange/aqua/yellow/magenta/green/violet/red) for the
+    //burn% trend chart, one color per user. Fixed order, assigned by username (not sort
+    //position) so a user's color never changes when the board re-sorts. A 9th user is never
+    //given a generated hue -- the trend chart simply caps at these 8.
+    const trendChartPalette = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
 
     //admin accounts, admin is any account with the Leader badge or a unique flair on the forums (list may be incomplete; users with no wk account like 'WaniMeKani' or 'system' are omitted)
     const adminNamesInfinity = ['viet', 'viet', 'Kristen', 'kristen', 'koichi', 'sam', 'oldbonsai', 'arpit.jalan', 'arpit', 'jenk', 'WaniKaniJavi', 'wanikanijavi', 'gomakuma'];//∞
@@ -384,6 +421,7 @@
                     const user = createDefaultUserObj(name);
                     await assignLevelAndAvatarFromWkProfile(user);
                     usersInfoList.push(user);
+                    recordProgressHistory();
                     inference();
                 } else {
                     notify('A user with that name already exists in the list.');
@@ -573,6 +611,7 @@
         const promises = usersInfoList.map(assignLevelAndAvatarFromWkProfile);//refresh all
         await Promise.all(promises);
 
+        recordProgressHistory();
         showLevelUps();
         inference();
     }
@@ -585,6 +624,20 @@
 
         loadFromCache('leaderboard_sortingMethod', 'key1').then(function (result) {
             userSortingMethod = result;
+        });
+
+        loadFromCache('leaderboard_history', {}).then(function (result) {
+            progressHistory = result || {};
+        });
+
+        loadFromCache('leaderboard_chartsOpen', false).then(function (result) {
+            showChartsPanel = result;
+            createLeaderboard();
+        });
+
+        loadFromCache('leaderboard_activeChartTab', 'srsStages').then(function (result) {
+            activeChartTab = result;
+            createLeaderboard();
         });
 
         loadFromCache('leaderboard_userList', undefined).then(function (result) {
@@ -697,7 +750,7 @@
             animation: leaderboard-spin 0.5s ease;
         }
 
-        #leaderboard .leaderboard-srs-toggle.is-active {
+        #leaderboard .leaderboard-charts-toggle.is-active {
             opacity: 1;
             color: var(--lb-accent);
             background: rgba(122, 75, 218, 0.12);
@@ -984,13 +1037,42 @@
             background: #6a3bd0;
         }
 
-        /* SRS stage comparison chart */
-        #leaderboard .leaderboard-srs-chart {
+        /* Charts panel: the toggleable container for both chart tabs below the table */
+        #leaderboard .leaderboard-charts-panel {
             margin-top: 14px;
             padding-top: 14px;
             border-top: 1px solid var(--lb-border);
         }
 
+        #leaderboard .leaderboard-chart-tabs {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 14px;
+        }
+
+        #leaderboard .leaderboard-chart-tab {
+            padding: 0 0 6px;
+            border: none;
+            border-bottom: 2px solid transparent;
+            background: transparent;
+            color: rgba(51, 51, 51, 0.6);
+            font-family: inherit;
+            font-weight: 600;
+            font-size: 0.8em;
+            cursor: pointer;
+            transition: color 0.15s ease, border-color 0.15s ease;
+        }
+
+        #leaderboard .leaderboard-chart-tab:hover {
+            color: #333;
+        }
+
+        #leaderboard .leaderboard-chart-tab.is-active {
+            color: var(--lb-accent);
+            border-bottom-color: var(--lb-accent);
+        }
+
+        /* SRS stage comparison chart */
         #leaderboard .leaderboard-srs-legend {
             display: flex;
             flex-wrap: wrap;
@@ -1052,6 +1134,120 @@
             text-align: right;
             font-size: 0.78em;
             opacity: 0.55;
+        }
+
+        /* Burn% trend chart */
+        #leaderboard .leaderboard-chart-empty {
+            padding: 20px 4px;
+            font-size: 0.85em;
+            opacity: 0.6;
+            text-align: center;
+        }
+
+        #leaderboard .leaderboard-chart-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+
+        #leaderboard .leaderboard-chart-legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.75em;
+            opacity: 0.7;
+        }
+
+        #leaderboard .leaderboard-chart-legend-swatch {
+            width: 10px;
+            height: 2px;
+            border-radius: 1px;
+        }
+
+        #leaderboard .leaderboard-chart-svg-wrap {
+            position: relative;
+        }
+
+        #leaderboard .leaderboard-chart-canvas {
+            display: block;
+            width: 100%;
+            height: 190px;
+        }
+
+        #leaderboard .leaderboard-chart-line {
+            stroke-width: 2;
+            stroke-linejoin: round;
+            stroke-linecap: round;
+        }
+
+        #leaderboard .leaderboard-chart-end-dot {
+            stroke: #fff;
+            stroke-width: 2;
+        }
+
+        #leaderboard .leaderboard-chart-gridline {
+            stroke: var(--lb-border);
+            stroke-width: 1;
+        }
+
+        #leaderboard .leaderboard-chart-axis-label {
+            fill: currentColor;
+            opacity: 0.5;
+            font-size: 9px;
+        }
+
+        #leaderboard .leaderboard-chart-crosshair {
+            stroke: var(--lb-border);
+            stroke-width: 1;
+        }
+
+        #leaderboard .leaderboard-chart-tooltip {
+            position: absolute;
+            z-index: 1;
+            min-width: 120px;
+            padding: 8px 10px;
+            border: 1px solid rgb(202, 208, 214);
+            border-radius: 8px;
+            background: #fff;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+            font-size: 0.78em;
+            pointer-events: none;
+        }
+
+        #leaderboard .leaderboard-chart-tooltip-date {
+            margin-bottom: 4px;
+            font-weight: 700;
+            color: #333;
+        }
+
+        #leaderboard .leaderboard-chart-tooltip-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 1px 0;
+        }
+
+        #leaderboard .leaderboard-chart-tooltip-swatch {
+            flex: 0 0 auto;
+            width: 8px;
+            height: 8px;
+            border-radius: 2px;
+        }
+
+        #leaderboard .leaderboard-chart-tooltip-name {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #666;
+        }
+
+        #leaderboard .leaderboard-chart-tooltip-value {
+            flex: 0 0 auto;
+            font-weight: 700;
+            color: #333;
         }
 
         /* Footer */
@@ -1494,6 +1690,205 @@
         </div>`;
     }
 
+    //short "Jul 24" label for a 'YYYY-MM-DD' date key, for the trend chart's x-axis
+    function formatShortDate(dateKey) {
+        const parts = dateKey.split('-');
+        const date = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+        return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    }
+
+    //which users get a line on the trend chart: alphabetical (stable regardless of the
+    //leaderboard's live sort order, so a user's color/position here never shifts just
+    //because Sort Order changed), capped at the palette size.
+    function usersForTrendChart() {
+        return usersInfoList
+            .slice()
+            .sort(function (a, b) { return a.name.localeCompare(b.name, 'en'); })
+            .slice(0, trendChartPalette.length);
+    }
+
+    //holds the scales/series from the most recent buildLineTrendChartHtml() call, read by
+    //attachLineTrendChartInteractivity() afterward so the hover logic doesn't recompute them
+    var lastLineTrendChart = null;
+
+    //generic line-over-time chart, one line per user (see usersForTrendChart), built from the
+    //daily snapshots recordProgressHistory() has been collecting. Burn% trend and level trend
+    //are both just this with a different metric/scale -- see the two wrappers below.
+    function buildLineTrendChartHtml(metricKey, yMax, yGridlineValues, formatValue, emptyMessage) {
+        const trackedUsers = usersForTrendChart();
+        const allDates = Array.from(new Set(
+            trackedUsers.reduce(function (acc, user) {
+                (progressHistory[user.name] || []).forEach(function (entry) { acc.push(entry.date); });
+                return acc;
+            }, [])
+        )).sort();
+
+        //cap to the most recent 30 days so the chart stays readable as history grows
+        const dates = allDates.slice(-30);
+
+        if (dates.length < 2) {
+            lastLineTrendChart = null;
+            return `<div class="leaderboard-chart-empty">${escapeHtml(emptyMessage)}</div>`;
+        }
+
+        const width = 600, height = 220;
+        const plotLeft = 34, plotRight = width - 12, plotTop = 12, plotBottom = height - 26;
+        const xFor = function (i) { return plotLeft + (i / (dates.length - 1)) * (plotRight - plotLeft); };
+        const yFor = function (value) { return plotBottom - (Math.min(Math.max(value, 0), yMax) / yMax) * (plotBottom - plotTop); };
+
+        const gridlinesHtml = yGridlineValues.map(function (value) {
+            const y = yFor(value);
+            return `<line class="leaderboard-chart-gridline" x1="${plotLeft}" y1="${y}" x2="${plotRight}" y2="${y}" />
+                <text class="leaderboard-chart-axis-label" x="${plotLeft - 6}" y="${y}" text-anchor="end" dominant-baseline="middle">${escapeHtml(formatValue(value))}</text>`;
+        }).join('');
+
+        const xLabelIndices = Array.from(new Set([0, Math.floor((dates.length - 1) / 2), dates.length - 1]));
+        const xLabelsHtml = xLabelIndices.map(function (i) {
+            return `<text class="leaderboard-chart-axis-label" x="${xFor(i)}" y="${height - 8}" text-anchor="middle">${escapeHtml(formatShortDate(dates[i]))}</text>`;
+        }).join('');
+
+        const series = trackedUsers.map(function (user, index) {
+            const color = trendChartPalette[index % trendChartPalette.length];
+            const byDate = {};
+            (progressHistory[user.name] || []).forEach(function (entry) { byDate[entry.date] = entry[metricKey]; });
+
+            const points = [];
+            dates.forEach(function (date, i) {
+                if (Object.prototype.hasOwnProperty.call(byDate, date)) {
+                    points.push({ x: xFor(i), y: yFor(byDate[date]), date: date, value: byDate[date] });
+                }
+            });
+            return { name: user.name, color: color, points: points };
+        }).filter(function (series) { return series.points.length > 0; });
+
+        lastLineTrendChart = { dates: dates, xFor: xFor, plotTop: plotTop, plotBottom: plotBottom, series: series, formatValue: formatValue };
+
+        const linesHtml = series.map(function (s) {
+            const pathD = s.points.map(function (p, idx) { return (idx === 0 ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1); }).join(' ');
+            const lastPoint = s.points[s.points.length - 1];
+            return `<path class="leaderboard-chart-line" stroke="${s.color}" d="${pathD}" fill="none" />
+                <circle class="leaderboard-chart-end-dot" cx="${lastPoint.x}" cy="${lastPoint.y}" r="4" fill="${s.color}" />`;
+        }).join('');
+
+        const legendHtml = series.map(function (s) {
+            return `<span class="leaderboard-chart-legend-item">
+                <span class="leaderboard-chart-legend-swatch" style="background:${s.color}"></span>${escapeHtml(s.name)}
+            </span>`;
+        }).join('');
+
+        return `<div class="leaderboard-chart">
+            <div class="leaderboard-chart-legend">${legendHtml}</div>
+            <div class="leaderboard-chart-svg-wrap">
+                <svg viewBox="0 0 ${width} ${height}" class="leaderboard-chart-canvas" preserveAspectRatio="none">
+                    ${gridlinesHtml}
+                    ${xLabelsHtml}
+                    ${linesHtml}
+                    <line class="leaderboard-chart-crosshair" x1="0" y1="${plotTop}" x2="0" y2="${plotBottom}" style="display:none" />
+                </svg>
+                <div class="leaderboard-chart-tooltip" style="display:none"></div>
+            </div>
+        </div>`;
+    }
+
+    const trendNoHistoryMessage = 'Come back after a couple more refreshes on different days — the trend chart needs at least two days of history to draw a line.';
+
+    function buildBurnTrendChartHtml() {
+        return buildLineTrendChartHtml('burnPercentage', 100, [0, 25, 50, 75, 100], function (v) { return v + '%'; }, trendNoHistoryMessage);
+    }
+
+    function buildLevelTrendChartHtml() {
+        return buildLineTrendChartHtml('level', 60, [0, 15, 30, 45, 60], function (v) { return String(v); }, trendNoHistoryMessage);
+    }
+
+    //vertical crosshair that snaps to the nearest date + a tooltip listing every user's
+    //value at that date. Must run after the chart's SVG is actually in the DOM. Works for
+    //either trend chart -- whichever one is currently in the DOM (see lastLineTrendChart).
+    function attachLineTrendChartInteractivity() {
+        if (!lastLineTrendChart) { return; }
+        const svg = document.querySelector('#leaderboard .leaderboard-chart-canvas');
+        const tooltip = document.querySelector('#leaderboard .leaderboard-chart-tooltip');
+        const crosshair = document.querySelector('#leaderboard .leaderboard-chart-crosshair');
+        if (!svg || !tooltip || !crosshair) { return; }
+
+        const chart = lastLineTrendChart;
+
+        function nearestDateIndex(viewBoxX) {
+            let closestIndex = 0;
+            let closestDistance = Infinity;
+            chart.dates.forEach(function (_, i) {
+                const distance = Math.abs(chart.xFor(i) - viewBoxX);
+                if (distance < closestDistance) { closestDistance = distance; closestIndex = i; }
+            });
+            return closestIndex;
+        }
+
+        function showAt(index, pointerEvent) {
+            const x = chart.xFor(index);
+            crosshair.setAttribute('x1', x);
+            crosshair.setAttribute('x2', x);
+            crosshair.style.display = '';
+
+            const date = chart.dates[index];
+            const rowsHtml = chart.series.map(function (s) {
+                const point = s.points.find(function (p) { return p.date === date; });
+                if (!point) { return ''; }
+                return `<div class="leaderboard-chart-tooltip-row">
+                    <span class="leaderboard-chart-tooltip-swatch" style="background:${s.color}"></span>
+                    <span class="leaderboard-chart-tooltip-name">${escapeHtml(s.name)}</span>
+                    <span class="leaderboard-chart-tooltip-value">${escapeHtml(chart.formatValue(point.value))}</span>
+                </div>`;
+            }).join('');
+            tooltip.innerHTML = `<div class="leaderboard-chart-tooltip-date">${escapeHtml(formatShortDate(date))}</div>${rowsHtml}`;
+
+            const wrapRect = svg.parentElement.getBoundingClientRect();
+            let left = pointerEvent.clientX - wrapRect.left + 12;
+            const top = Math.max(0, pointerEvent.clientY - wrapRect.top - 10);
+            tooltip.style.display = '';
+            if (left + tooltip.offsetWidth > wrapRect.width) {
+                left = pointerEvent.clientX - wrapRect.left - tooltip.offsetWidth - 12;
+            }
+            tooltip.style.left = left + 'px';
+            tooltip.style.top = top + 'px';
+        }
+
+        function pointerToViewBoxX(pointerEvent) {
+            const point = svg.createSVGPoint();
+            point.x = pointerEvent.clientX;
+            point.y = pointerEvent.clientY;
+            return point.matrixTransform(svg.getScreenCTM().inverse()).x;
+        }
+
+        svg.addEventListener('pointermove', function (pointerEvent) {
+            showAt(nearestDateIndex(pointerToViewBoxX(pointerEvent)), pointerEvent);
+        });
+        svg.addEventListener('pointerleave', function () {
+            crosshair.style.display = 'none';
+            tooltip.style.display = 'none';
+        });
+    }
+
+    //the expandable panel toggled by the toolbar's chart icon: a small tab strip
+    //switching between the two chart types built above.
+    function buildChartsPanelHtml() {
+        const tabs = [
+            { key: 'srsStages', label: 'SRS Stages' },
+            { key: 'burnTrend', label: 'Burn % Trend' },
+            { key: 'levelTrend', label: 'Level Trend' },
+        ];
+        const tabsHtml = tabs.map(function (tab) {
+            return `<button type="button" class="leaderboard-chart-tab${activeChartTab === tab.key ? ' is-active' : ''}" data-chart-tab="${tab.key}">${tab.label}</button>`;
+        }).join('');
+
+        const activeChartHtml = activeChartTab === 'burnTrend' ? buildBurnTrendChartHtml()
+            : activeChartTab === 'levelTrend' ? buildLevelTrendChartHtml()
+            : buildSrsChartHtml();
+
+        return `<div class="leaderboard-charts-panel">
+            <div class="leaderboard-chart-tabs">${tabsHtml}</div>
+            <div class="leaderboard-chart-tab-content">${activeChartHtml}</div>
+        </div>`;
+    }
+
     function escapeHtml(str) {
         return String(str).replace(/[&<>"']/g, function (c) {
             return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -1589,7 +1984,7 @@
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M7.5 7.5 12 3m0 0 4.5 4.5M12 3v13.5" /></svg>
                             </label>
                             <input type="file" id="leaderboard-files-import" name="files[]" accept=".csv" multiple />
-                            <span class="leaderboard-icon-btn leaderboard-srs-toggle${showSrsChart ? ' is-active' : ''}" title="Compare Apprentice/Guru/Master/Enlightened/Burned">
+                            <span class="leaderboard-icon-btn leaderboard-charts-toggle${showChartsPanel ? ' is-active' : ''}" title="Progress charts">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18M8 17V9m4 8V5m4 12v-4" /></svg>
                             </span>
                             <span class="leaderboard-icon-btn leaderboard-refresh" title="Refresh leaderboard">
@@ -1601,7 +1996,7 @@
                         </div>
                     </div>
                     ${contentHtml}
-                    ${showSrsChart ? buildSrsChartHtml() : ''}
+                    ${showChartsPanel ? buildChartsPanelHtml() : ''}
                     ${timeSinceLastRefreshHtml}
                 </div>
             </div>
@@ -1636,11 +2031,24 @@
         const refreshBtn = document.querySelector('#leaderboard .leaderboard-refresh');
         if (refreshBtn) refreshBtn.addEventListener('click', refreshDashboard);
 
-        const srsToggleBtn = document.querySelector('#leaderboard .leaderboard-srs-toggle');
-        if (srsToggleBtn) srsToggleBtn.addEventListener('click', function () {
-            showSrsChart = !showSrsChart;
+        const chartsToggleBtn = document.querySelector('#leaderboard .leaderboard-charts-toggle');
+        if (chartsToggleBtn) chartsToggleBtn.addEventListener('click', function () {
+            showChartsPanel = !showChartsPanel;
+            saveToCache('leaderboard_chartsOpen', showChartsPanel);
             createLeaderboard();
         });
+
+        document.querySelectorAll('#leaderboard .leaderboard-chart-tab').forEach(function (tabBtn) {
+            tabBtn.addEventListener('click', function () {
+                activeChartTab = tabBtn.dataset.chartTab;
+                saveToCache('leaderboard_activeChartTab', activeChartTab);
+                createLeaderboard();
+            });
+        });
+
+        if (showChartsPanel && (activeChartTab === 'burnTrend' || activeChartTab === 'levelTrend')) {
+            attachLineTrendChartInteractivity();
+        }
 
         const exportBtn = document.querySelector('#leaderboard .leaderboard-export');
         if (exportBtn) exportBtn.addEventListener('click', exportUsers);
