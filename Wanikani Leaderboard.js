@@ -1633,21 +1633,20 @@
 
     function importUsers(evt) {
         // Check for the various File API support.
-        if (window.File && window.FileReader && window.FileList && window.Blob) {
-            // All the File APIs are supported.
-        } else {
+        if (!(window.File && window.FileReader && window.FileList && window.Blob)) {
             notify('The File APIs are not fully supported in this browser.');
+            return;
         }
 
         var files = evt.target.files;
         var file = files[0];
 
-        // read the file metadata
-        if (file.type === 'application/vnd.ms-excel') {
-            // read the file contents
+        //browsers/OSes report wildly inconsistent MIME types for .csv (text/csv, empty string,
+        //application/vnd.ms-excel, etc. all show up in practice) -- check the extension instead
+        if (file.name.toLowerCase().endsWith('.csv')) {
             processImportedUsers(file);
         } else {
-            notify('File type \'' + file.type + '\' is incorrect.', 'Use a .csv file.');
+            notify('File \'' + file.name + '\' is not a .csv file.', 'Use a .csv file.');
         }
     }
 
