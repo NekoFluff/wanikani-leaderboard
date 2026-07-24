@@ -22,18 +22,19 @@ There's no build step; the script is a single self-contained file.
 
 ## Features
 
-- **Leaderboard table** — rank, avatar, level, and burn % for every user you add,
-  with small delta badges showing change since your last refresh.
+- **Leaderboard table** — rank, avatar, level, items seen, and burn % for every user
+  you add, with small delta badges showing change since your last refresh.
 - **Add / remove users** via the settings gear icon; import or export your list as
   CSV from the toolbar.
 - **Sort order** — level, burn %, or name, ascending or descending.
-- **Charts panel** (toolbar icon) with three views:
+- **Charts panel** (toolbar icon) with four views:
   - _SRS Stages_ — a stacked bar comparing everyone's Apprentice/Guru/Master/Enlightened/Burned counts.
-  - _Burn % Trend_ — a line chart of burn % over time, one line per user.
-  - _Level Trend_ — the same, for level.
-- Trend charts are built from a daily snapshot of each user's stats, recorded
-  automatically on refresh — history accumulates from whenever you install the
-  script (there's no way to backfill the past).
+  - _Seen_ — a line chart of % of all WK items seen over time, one line per user.
+  - _Burn %_ — the same, for burn %.
+  - _Level_ — the same, for level.
+- The three line charts are built from a daily snapshot of each user's stats,
+  recorded automatically on refresh — history accumulates from whenever you
+  install the script (there's no way to backfill the past).
 
 ## Credits
 

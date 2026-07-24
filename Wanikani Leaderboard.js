@@ -215,8 +215,8 @@
     var usersInfoList = [];
     var userSortingMethod = 'key1';
     var showChartsPanel = false;//whether the charts panel is expanded
-    var activeChartTab = 'srsStages';//'srsStages' | 'burnTrend' -- which chart tab is showing
-    var progressHistory = {};//{ [username]: [{date:'YYYY-MM-DD', level, burnPercentage}, ...] }, oldest first
+    var activeChartTab = 'srsStages';//'srsStages' | 'seenTrend' | 'burnTrend' | 'levelTrend' -- which chart tab is showing
+    var progressHistory = {};//{ [username]: [{date:'YYYY-MM-DD', level, burnPercentage, seenPercentage}, ...] }, oldest first
 
     //generic cache helpers used for every simple leaderboard_* setting below
     function saveToCache(key, value) {
@@ -245,7 +245,7 @@
         usersInfoList.forEach(function (user) {
             if (!user.wasUserFound) { return; }
             const entries = progressHistory[user.name] || (progressHistory[user.name] = []);
-            const snapshot = { date: dateKey, level: user.level, burnPercentage: user.totalBurnPercentage };
+            const snapshot = { date: dateKey, level: user.level, burnPercentage: user.totalBurnPercentage, seenPercentage: seenPercentageFor(user) };
             const lastEntry = entries[entries.length - 1];
             if (lastEntry && lastEntry.date === dateKey) {
                 entries[entries.length - 1] = snapshot;
@@ -1677,6 +1677,11 @@
         return srsStages.reduce(function (sum, stage) { return sum + (dist[stage.key + 'Total'] || 0); }, 0);
     }
 
+    //% of all WK items a user has seen (any SRS stage), for the Seen column bar and trend chart
+    function seenPercentageFor(user) {
+        return Math.round((srsStageTotal(user) / totalNumberOfWKItems) * 100 * 100) / 100;
+    }
+
     //horizontal stacked-bar chart comparing everyone's Apprentice/Guru/Master/Enlightened/Burned
     //counts. Bar length reflects each user's total items learned (relative to whoever has the
     //most); the colored segments within a bar show how those items are split across stages.
@@ -1744,8 +1749,8 @@
     var lastLineTrendChart = null;
 
     //generic line-over-time chart, one line per user (see usersForTrendChart), built from the
-    //daily snapshots recordProgressHistory() has been collecting. Burn% trend and level trend
-    //are both just this with a different metric/scale -- see the two wrappers below.
+    //daily snapshots recordProgressHistory() has been collecting. Seen%, Burn%, and Level are
+    //all just this with a different metric/scale -- see the wrappers below.
     function buildLineTrendChartHtml(metricKey, yMax, yGridlineValues, formatValue, emptyMessage) {
         const trackedUsers = usersForTrendChart();
         const allDates = Array.from(new Set(
@@ -1832,6 +1837,10 @@
         return buildLineTrendChartHtml('level', 60, [0, 15, 30, 45, 60], function (v) { return String(v); }, trendNoHistoryMessage);
     }
 
+    function buildSeenTrendChartHtml() {
+        return buildLineTrendChartHtml('seenPercentage', 100, [0, 25, 50, 75, 100], function (v) { return v + '%'; }, trendNoHistoryMessage);
+    }
+
     //vertical crosshair that snaps to the nearest date + a tooltip listing every user's
     //value at that date. Must run after the chart's SVG is actually in the DOM. Works for
     //either trend chart -- whichever one is currently in the DOM (see lastLineTrendChart).
@@ -1904,14 +1913,16 @@
     function buildChartsPanelHtml() {
         const tabs = [
             { key: 'srsStages', label: 'SRS Stages' },
-            { key: 'burnTrend', label: 'Burn % Trend' },
-            { key: 'levelTrend', label: 'Level Trend' },
+            { key: 'seenTrend', label: 'Seen' },
+            { key: 'burnTrend', label: 'Burn %' },
+            { key: 'levelTrend', label: 'Level' },
         ];
         const tabsHtml = tabs.map(function (tab) {
             return `<button type="button" class="leaderboard-chart-tab${activeChartTab === tab.key ? ' is-active' : ''}" data-chart-tab="${tab.key}">${tab.label}</button>`;
         }).join('');
 
-        const activeChartHtml = activeChartTab === 'burnTrend' ? buildBurnTrendChartHtml()
+        const activeChartHtml = activeChartTab === 'seenTrend' ? buildSeenTrendChartHtml()
+            : activeChartTab === 'burnTrend' ? buildBurnTrendChartHtml()
             : activeChartTab === 'levelTrend' ? buildLevelTrendChartHtml()
             : buildSrsChartHtml();
 
@@ -1937,13 +1948,11 @@
                 const displayName = escapeHtml(user.name + userErrorNotFoundMessage);
                 const profileHref = encodeURIComponent(user.name);
 
-                const burnTooltip = user.level != 3
-                    ? `Total burned: ${user.srs_distribution[0].burnTotal} (${user.totalBurnPercentage}%)`
-                    : 'Users without a subscription show as level 3';
+                const burnTooltip = `Burned: ${user.srs_distribution[0].burnTotal} / ${totalNumberOfWKItems} (${user.totalBurnPercentage}%)`;
 
                 const seenTotal = srsStageTotal(user);
-                const seenPercentage = Math.round((seenTotal / totalNumberOfWKItems) * 100 * 100) / 100;
-                const seenTooltip = `Seen (any SRS stage): ${seenTotal} / ${totalNumberOfWKItems} (${seenPercentage}%)`;
+                const seenPercentage = seenPercentageFor(user);
+                const seenTooltip = `Seen: ${seenTotal} / ${totalNumberOfWKItems} (${seenPercentage}%)`;
 
                 rowsHtml += `<tr>
                     <td class="leaderboard-col-rank" title="${escapeHtml(wkRealmNames[user.realm_number])}">
@@ -1957,7 +1966,7 @@
                         <a href="users/${profileHref}" target="_blank" class="leaderboard-user-link">
                             <span class="leaderboard-user-name leaderboardSpan">${displayName}</span>
                             ${achievementIconHtml(user)}
-                            <span class="leaderboard-level-badge" data-level="${user.level}">${user.level}</span>
+                            <span class="leaderboard-level-badge">${user.level}</span>
                             ${deltaBadgeHtml(user.levelDelta, '')}
                         </a>
                     </td>
@@ -2087,7 +2096,7 @@
             });
         });
 
-        if (showChartsPanel && (activeChartTab === 'burnTrend' || activeChartTab === 'levelTrend')) {
+        if (showChartsPanel && (activeChartTab === 'seenTrend' || activeChartTab === 'burnTrend' || activeChartTab === 'levelTrend')) {
             attachLineTrendChartInteractivity();
         }
 
