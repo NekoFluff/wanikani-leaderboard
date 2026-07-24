@@ -195,6 +195,7 @@
     //userlist
     var usersInfoList = [];
     var userSortingMethod = 'key1';
+    var showSrsChart = false;//whether the SRS stage comparison chart is expanded
 
     //generic cache helpers used for every simple leaderboard_* setting below
     function saveToCache(key, value) {
@@ -237,6 +238,15 @@
     const wkRealms = ['快', '苦', '死', '地獄', '天堂', '現実', '?'];
     const wkRealmNames = ['Pleasant', 'Painful', 'Death', 'Hell', 'Paradise', 'Reality', 'Error'];
     const leaderboardColors = ['none', 'apprColor', 'guruColor', 'masterColor', 'enlightenedColor', 'burnedColor', 'errorColor'];
+
+    //SRS stages shown in the stage-comparison chart, in pipeline order
+    const srsStages = [
+        { key: 'appr', label: 'Apprentice', colorClass: 'apprColor' },
+        { key: 'guru', label: 'Guru', colorClass: 'guruColor' },
+        { key: 'master', label: 'Master', colorClass: 'masterColor' },
+        { key: 'enlight', label: 'Enlightened', colorClass: 'enlightenedColor' },
+        { key: 'burn', label: 'Burned', colorClass: 'burnedColor' },
+    ];
 
     //admin accounts, admin is any account with the Leader badge or a unique flair on the forums (list may be incomplete; users with no wk account like 'WaniMeKani' or 'system' are omitted)
     const adminNamesInfinity = ['viet', 'viet', 'Kristen', 'kristen', 'koichi', 'sam', 'oldbonsai', 'arpit.jalan', 'arpit', 'jenk', 'WaniKaniJavi', 'wanikanijavi', 'gomakuma'];//∞
@@ -687,6 +697,12 @@
             animation: leaderboard-spin 0.5s ease;
         }
 
+        #leaderboard .leaderboard-srs-toggle.is-active {
+            opacity: 1;
+            color: var(--lb-accent);
+            background: rgba(122, 75, 218, 0.12);
+        }
+
         #leaderboard_loader {
             display: none;
             width: 18px;
@@ -921,6 +937,20 @@
         #leaderboard .leaderboard-realm-badge.burnedColor { background: #faac05; color: #3a2a00; }
         #leaderboard .leaderboard-realm-badge.errorColor { background: #8b0000; color: #fff; }
 
+        /* Same 5 SRS-stage colors, reused for the stage-comparison chart's bar segments
+           and legend swatches (kept separate from the realm-badge rules above since they
+           apply to different elements). */
+        #leaderboard .leaderboard-srs-segment.apprColor,
+        #leaderboard .leaderboard-srs-legend-swatch.apprColor { background: #dd0093; }
+        #leaderboard .leaderboard-srs-segment.guruColor,
+        #leaderboard .leaderboard-srs-legend-swatch.guruColor { background: #9300dd; }
+        #leaderboard .leaderboard-srs-segment.masterColor,
+        #leaderboard .leaderboard-srs-legend-swatch.masterColor { background: #2545C3; }
+        #leaderboard .leaderboard-srs-segment.enlightenedColor,
+        #leaderboard .leaderboard-srs-legend-swatch.enlightenedColor { background: #0093dd; }
+        #leaderboard .leaderboard-srs-segment.burnedColor,
+        #leaderboard .leaderboard-srs-legend-swatch.burnedColor { background: #faac05; }
+
         /* Empty state */
         #leaderboard .leaderboard-empty {
             display: flex;
@@ -952,6 +982,76 @@
 
         #leaderboard .leaderboard-empty-add-btn:hover {
             background: #6a3bd0;
+        }
+
+        /* SRS stage comparison chart */
+        #leaderboard .leaderboard-srs-chart {
+            margin-top: 14px;
+            padding-top: 14px;
+            border-top: 1px solid var(--lb-border);
+        }
+
+        #leaderboard .leaderboard-srs-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        #leaderboard .leaderboard-srs-legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.75em;
+            opacity: 0.7;
+        }
+
+        #leaderboard .leaderboard-srs-legend-swatch {
+            width: 9px;
+            height: 9px;
+            border-radius: 2px;
+        }
+
+        #leaderboard .leaderboard-srs-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 5px 0;
+        }
+
+        #leaderboard .leaderboard-srs-row-name {
+            flex: 0 0 100px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        #leaderboard .leaderboard-srs-row-bar-track {
+            flex: 1;
+            min-width: 0;
+        }
+
+        #leaderboard .leaderboard-srs-row-bar {
+            display: flex;
+            height: 14px;
+            border-radius: 4px;
+            overflow: hidden;
+            background: var(--lb-track);
+            transition: width 0.2s ease;
+        }
+
+        #leaderboard .leaderboard-srs-segment {
+            height: 100%;
+        }
+
+        #leaderboard .leaderboard-srs-row-total {
+            flex: 0 0 auto;
+            width: 40px;
+            text-align: right;
+            font-size: 0.78em;
+            opacity: 0.55;
         }
 
         /* Footer */
@@ -1346,6 +1446,54 @@
         return `<span class="leaderboard-delta leaderboard-delta--${direction}">${sign}${delta}${unit}</span>`;
     }
 
+    //total item count across all 5 SRS stages for one user
+    function srsStageTotal(user) {
+        const dist = user.srs_distribution[0] || {};
+        return srsStages.reduce(function (sum, stage) { return sum + (dist[stage.key + 'Total'] || 0); }, 0);
+    }
+
+    //horizontal stacked-bar chart comparing everyone's Apprentice/Guru/Master/Enlightened/Burned
+    //counts. Bar length reflects each user's total items learned (relative to whoever has the
+    //most); the colored segments within a bar show how those items are split across stages.
+    function buildSrsChartHtml() {
+        if (usersInfoList.length === 0) { return ''; }
+
+        const maxTotal = Math.max(1, ...usersInfoList.map(srsStageTotal));
+
+        const legendHtml = srsStages.map(function (stage) {
+            return `<span class="leaderboard-srs-legend-item">
+                <span class="leaderboard-srs-legend-swatch ${stage.colorClass}"></span>${stage.label}
+            </span>`;
+        }).join('');
+
+        const rowsHtml = usersInfoList.map(function (user) {
+            const dist = user.srs_distribution[0] || {};
+            const total = srsStageTotal(user);
+            const barWidthPct = (total / maxTotal) * 100;
+
+            const segmentsHtml = srsStages.map(function (stage) {
+                const count = dist[stage.key + 'Total'] || 0;
+                if (!count) { return ''; }
+                const segmentPct = (count / total) * 100;
+                const tooltip = `${stage.label}: ${count} (${Math.round(segmentPct)}%)`;
+                return `<div class="leaderboard-srs-segment ${stage.colorClass}" style="width:${segmentPct}%" title="${escapeHtml(tooltip)}"></div>`;
+            }).join('');
+
+            return `<div class="leaderboard-srs-row">
+                <div class="leaderboard-srs-row-name">${escapeHtml(user.name)}</div>
+                <div class="leaderboard-srs-row-bar-track">
+                    <div class="leaderboard-srs-row-bar" style="width:${barWidthPct}%">${segmentsHtml}</div>
+                </div>
+                <div class="leaderboard-srs-row-total">${total}</div>
+            </div>`;
+        }).join('');
+
+        return `<div class="leaderboard-srs-chart">
+            <div class="leaderboard-srs-legend">${legendHtml}</div>
+            ${rowsHtml}
+        </div>`;
+    }
+
     function escapeHtml(str) {
         return String(str).replace(/[&<>"']/g, function (c) {
             return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -1441,6 +1589,9 @@
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M7.5 7.5 12 3m0 0 4.5 4.5M12 3v13.5" /></svg>
                             </label>
                             <input type="file" id="leaderboard-files-import" name="files[]" accept=".csv" multiple />
+                            <span class="leaderboard-icon-btn leaderboard-srs-toggle${showSrsChart ? ' is-active' : ''}" title="Compare Apprentice/Guru/Master/Enlightened/Burned">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18M8 17V9m4 8V5m4 12v-4" /></svg>
+                            </span>
                             <span class="leaderboard-icon-btn leaderboard-refresh" title="Refresh leaderboard">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
                             </span>
@@ -1450,6 +1601,7 @@
                         </div>
                     </div>
                     ${contentHtml}
+                    ${showSrsChart ? buildSrsChartHtml() : ''}
                     ${timeSinceLastRefreshHtml}
                 </div>
             </div>
@@ -1483,6 +1635,12 @@
 
         const refreshBtn = document.querySelector('#leaderboard .leaderboard-refresh');
         if (refreshBtn) refreshBtn.addEventListener('click', refreshDashboard);
+
+        const srsToggleBtn = document.querySelector('#leaderboard .leaderboard-srs-toggle');
+        if (srsToggleBtn) srsToggleBtn.addEventListener('click', function () {
+            showSrsChart = !showSrsChart;
+            createLeaderboard();
+        });
 
         const exportBtn = document.querySelector('#leaderboard .leaderboard-export');
         if (exportBtn) exportBtn.addEventListener('click', exportUsers);
