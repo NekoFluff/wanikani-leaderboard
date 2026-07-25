@@ -1,15 +1,15 @@
 // ==UserScript==
-// @name         Wanikani Leaderboard 2
+// @name         Wanikani Leaderboard 2 (2026 Fix)
 // @namespace    http://tampermonkey.net/
-// @version      3.0.0
+// @version      3.0.2
 // @description  Get levels from usernames and order them in a competitive list
 // @author       crazyfluff, faraplay, Dani2
 // @include      https://www.wanikani.com/dashboard
 // @include      https://www.wanikani.com/
 // @grant        none
 // @license      MIT
-// @downloadURL https://update.greasyfork.org/scripts/488876/Wanikani%20Leaderboard%202.user.js
-// @updateURL https://update.greasyfork.org/scripts/488876/Wanikani%20Leaderboard%202.meta.js
+// @downloadURL https://update.greasyfork.org/scripts/551822/Wanikani%20Leaderboard%202%20%282026%20Fix%29.user.js
+// @updateURL https://update.greasyfork.org/scripts/551822/Wanikani%20Leaderboard%202%20%282026%20Fix%29.meta.js
 // ==/UserScript==
 
 (function () {
@@ -1968,8 +1968,8 @@
 
         const activeChartHtml = activeChartTab === 'seenTrend' ? buildSeenTrendChartHtml()
             : activeChartTab === 'burnTrend' ? buildBurnTrendChartHtml()
-            : activeChartTab === 'levelTrend' ? buildLevelTrendChartHtml()
-            : buildSrsChartHtml();
+                : activeChartTab === 'levelTrend' ? buildLevelTrendChartHtml()
+                    : buildSrsChartHtml();
 
         return `<div class="leaderboard-charts-panel">
             <div class="leaderboard-chart-tabs">${tabsHtml}</div>
