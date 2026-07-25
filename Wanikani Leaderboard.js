@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wanikani Leaderboard 2 (2026 Fix)
 // @namespace    http://tampermonkey.net/
-// @version      3.1.0
+// @version      3.2.0
 // @description  Get levels from usernames and order them in a competitive list
 // @author       crazyfluff, faraplay, Dani2
 // @include      https://www.wanikani.com/dashboard
@@ -217,6 +217,7 @@
     var showChartsPanel = false;//whether the charts panel is expanded
     var activeChartTab = 'srsStages';//'srsStages' | 'seenTrend' | 'burnTrend' | 'levelTrend' -- which chart tab is showing
     var trendValueMode = 'percent';//'percent' | 'count' -- burn%/seen% trend charts' %/# switch
+    var trendWindowPreset = '1M';//'1M' | '3M' | '6M' | '1Y' | 'All' -- how far back the trend charts show
     //raw per-stage counts, not percentages, are stored -- burn%/seen% are derived at render time
     //against the current totalNumberOfWKItems (see percentOf), so historical points stay consistent
     //with today's catalog size instead of being frozen at whatever total existed when recorded, and
@@ -239,6 +240,7 @@
     const CACHE_KEY_ACTIVE_CHART_TAB = 'wkof.settings.leaderboard_activeChartTab';
     const CACHE_KEY_TIME_SINCE_LAST_REFRESH = 'wkof.settings.leaderboard_timeSinceLastRefresh';
     const CACHE_KEY_TREND_VALUE_MODE = 'wkof.settings.leaderboard_trendValueMode';
+    const CACHE_KEY_TREND_WINDOW_PRESET = 'wkof.settings.leaderboard_trendWindowPreset';
 
     //generic cache helpers used for every simple setting below
     function saveToCache(key, value) {
@@ -327,6 +329,9 @@
     //position) so a user's color never changes when the board re-sorts. A 9th user is never
     //given a generated hue -- the trend chart simply caps at these 8.
     const trendChartPalette = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
+
+    //how far back each trend-window preset reaches; 'All' has no cutoff
+    const TREND_WINDOW_DAYS = { '1M': 30, '3M': 90, '6M': 180, '1Y': 365, 'All': Infinity };
 
     const accountNotFoundMessage = ' (Not Found)';
 
@@ -686,6 +691,11 @@
 
         loadFromCache(CACHE_KEY_TREND_VALUE_MODE, 'percent').then(function (result) {
             trendValueMode = result;
+            createLeaderboard();
+        });
+
+        loadFromCache(CACHE_KEY_TREND_WINDOW_PRESET, '1M').then(function (result) {
+            trendWindowPreset = result;
             createLeaderboard();
         });
 
@@ -1321,6 +1331,31 @@
             color: rgba(255, 255, 255, 0.85);
         }
 
+        #leaderboard .leaderboard-chart-range-toggle {
+            display: inline-flex;
+            border: 0.5px solid var(--lb-border);
+            border-radius: 999px;
+            padding: 2px;
+            gap: 2px;
+            margin-bottom: 10px;
+        }
+
+        #leaderboard .leaderboard-chart-range-btn {
+            border: none;
+            background: transparent;
+            padding: 3px 9px;
+            border-radius: 999px;
+            font-size: 0.68em;
+            font-weight: 600;
+            color: var(--lb-muted);
+            cursor: pointer;
+        }
+
+        #leaderboard .leaderboard-chart-range-btn.is-active {
+            background: var(--lb-accent);
+            color: #fff;
+        }
+
         #leaderboard .leaderboard-chart-legend-item {
             display: inline-flex;
             align-items: center;
@@ -1375,6 +1410,8 @@
         /* Drag-to-compare range brush */
         #leaderboard .leaderboard-chart-canvas {
             touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
         }
 
         #leaderboard .leaderboard-chart-brush-rect {
@@ -1947,6 +1984,19 @@
         </div>`;
     }
 
+    //thins a long date list so the line doesn't get overcrowded at wide windows (1Y/All), always
+    //keeping the most recent date so the chart's rightmost point still matches the true latest
+    //value. Tooltips/deltas naturally end up comparing week-over-week or month-over-month once
+    //thinning kicks in, since they read whichever dates actually got plotted.
+    function downsampleDates(dateList, maxPoints) {
+        if (dateList.length <= maxPoints) { return dateList; }
+        const step = Math.ceil(dateList.length / maxPoints);
+        const picked = dateList.filter(function (_, i) { return i % step === 0; });
+        const last = dateList[dateList.length - 1];
+        if (picked[picked.length - 1] !== last) { picked.push(last); }
+        return picked;
+    }
+
     //short "Jul 24" label for a 'YYYY-MM-DD' date key, for the trend chart's x-axis
     function formatShortDate(dateKey) {
         const parts = dateKey.split('-');
@@ -2002,8 +2052,11 @@
             }, [])
         )).sort();
 
-        //cap to the most recent 30 days so the chart stays readable as history grows
-        const dates = allDates.slice(-30);
+        //cap to the selected window (see trendWindowPreset), then thin long windows so the line
+        //stays readable rather than a dense scribble of daily points
+        const windowDays = TREND_WINDOW_DAYS[trendWindowPreset] || 30;
+        const windowedDates = isFinite(windowDays) ? allDates.slice(-windowDays) : allDates;
+        const dates = downsampleDates(windowedDates, 60);
 
         if (dates.length < 2) {
             lastLineTrendChart = null;
@@ -2083,11 +2136,18 @@
             </span>
         </button>` : '';
 
+        const rangeToggleHtml = `<div class="leaderboard-chart-range-toggle" role="group" aria-label="Time range">
+            ${Object.keys(TREND_WINDOW_DAYS).map(function (preset) {
+            return `<button type="button" class="leaderboard-chart-range-btn${trendWindowPreset === preset ? ' is-active' : ''}" data-window-preset="${preset}">${preset}</button>`;
+        }).join('')}
+        </div>`;
+
         return `<div class="leaderboard-chart">
             <div class="leaderboard-chart-header">
                 <div class="leaderboard-chart-legend">${legendHtml}</div>
                 ${modeToggleHtml}
             </div>
+            ${rangeToggleHtml}
             <div class="leaderboard-chart-svg-wrap">
                 <svg viewBox="0 0 ${width} ${height}" class="leaderboard-chart-canvas" preserveAspectRatio="none">
                     ${brushHtml}
@@ -2503,6 +2563,14 @@
             trendValueMode = newMode;
             saveToCache(CACHE_KEY_TREND_VALUE_MODE, trendValueMode);
             setTimeout(createLeaderboard, 250);
+        });
+
+        document.querySelectorAll('#leaderboard .leaderboard-chart-range-btn').forEach(function (rangeBtn) {
+            rangeBtn.addEventListener('click', function () {
+                trendWindowPreset = rangeBtn.dataset.windowPreset;
+                saveToCache(CACHE_KEY_TREND_WINDOW_PRESET, trendWindowPreset);
+                createLeaderboard();
+            });
         });
 
         if (showChartsPanel && (activeChartTab === 'seenTrend' || activeChartTab === 'burnTrend' || activeChartTab === 'levelTrend')) {
