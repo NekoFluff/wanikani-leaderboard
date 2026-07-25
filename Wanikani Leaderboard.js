@@ -301,7 +301,7 @@
     //------------------------------
     // Global variables
     //------------------------------
-    const wkRealms = ['快', '苦', '死', '地獄', '天堂', '現実', '?'];
+    const wkRealms = ['快', '苦', '死', '地獄', '天国', '現実', '?'];
     const wkRealmNames = ['Pleasant', 'Painful', 'Death', 'Hell', 'Paradise', 'Reality', 'Error'];
     const leaderboardColors = ['none', 'apprColor', 'guruColor', 'masterColor', 'enlightenedColor', 'burnedColor', 'errorColor'];
 
