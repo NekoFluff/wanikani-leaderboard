@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wanikani Leaderboard 2 (2026 Fix)
 // @namespace    http://tampermonkey.net/
-// @version      3.0.4
+// @version      3.1.0
 // @description  Get levels from usernames and order them in a competitive list
 // @author       crazyfluff, faraplay, Dani2
 // @include      https://www.wanikani.com/dashboard
@@ -216,11 +216,18 @@
     var userSortingMethod = 'key1';
     var showChartsPanel = false;//whether the charts panel is expanded
     var activeChartTab = 'srsStages';//'srsStages' | 'seenTrend' | 'burnTrend' | 'levelTrend' -- which chart tab is showing
+    var trendValueMode = 'percent';//'percent' | 'count' -- burn%/seen% trend charts' %/# switch
     //raw per-stage counts, not percentages, are stored -- burn%/seen% are derived at render time
     //against the current totalNumberOfWKItems (see percentOf), so historical points stay consistent
     //with today's catalog size instead of being frozen at whatever total existed when recorded, and
     //"seen" is just the sum of all five stages rather than its own separately-tracked field
     var progressHistory = {};//{ [username]: [{date:'YYYY-MM-DD', level, appr, guru, master, enlight, burn}, ...] }, oldest first
+
+    //date range picked by dragging across a trend chart (see attachLineTrendChartInteractivity);
+    //while set, it drives the main table's delta badges instead of "since last refresh". Not
+    //persisted to cache -- it's a temporary lens for the current session, cleared by a plain click
+    //on a chart or the banner's clear button.
+    var selectedDeltaRange = null;//{ start: 'YYYY-MM-DD', end: 'YYYY-MM-DD' } | null
 
     //cache keys, namespaced under wkof.settings.* so wkof's file_cache never sweeps them for
     //inactivity -- its cleanup only exempts keys matching that prefix (see file_cache_cleanup in
@@ -231,6 +238,7 @@
     const CACHE_KEY_CHARTS_OPEN = 'wkof.settings.leaderboard_chartsOpen';
     const CACHE_KEY_ACTIVE_CHART_TAB = 'wkof.settings.leaderboard_activeChartTab';
     const CACHE_KEY_TIME_SINCE_LAST_REFRESH = 'wkof.settings.leaderboard_timeSinceLastRefresh';
+    const CACHE_KEY_TREND_VALUE_MODE = 'wkof.settings.leaderboard_trendValueMode';
 
     //generic cache helpers used for every simple setting below
     function saveToCache(key, value) {
@@ -673,6 +681,11 @@
 
         loadFromCache(CACHE_KEY_ACTIVE_CHART_TAB, 'srsStages').then(function (result) {
             activeChartTab = result;
+            createLeaderboard();
+        });
+
+        loadFromCache(CACHE_KEY_TREND_VALUE_MODE, 'percent').then(function (result) {
+            trendValueMode = result;
             createLeaderboard();
         });
 
@@ -1221,11 +1234,91 @@
             text-align: center;
         }
 
+        #leaderboard .leaderboard-chart-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+
         #leaderboard .leaderboard-chart-legend {
             display: flex;
             flex-wrap: wrap;
             gap: 12px;
-            margin-bottom: 10px;
+        }
+
+        #leaderboard .leaderboard-chart-mode-switch {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            flex: none;
+            width: 46px;
+            height: 22px;
+            padding: 0;
+            border: none;
+            border-radius: 999px;
+            background: var(--lb-track);
+            cursor: pointer;
+            transition: background 0.2s ease;
+        }
+
+        #leaderboard .leaderboard-chart-mode-switch:hover {
+            background: var(--lb-hover);
+        }
+
+        #leaderboard .leaderboard-chart-mode-switch.is-count {
+            background: var(--lb-accent);
+        }
+
+        #leaderboard .leaderboard-chart-mode-switch.is-count:hover {
+            background: var(--lb-accent);
+            opacity: 0.9;
+        }
+
+        #leaderboard .leaderboard-chart-mode-switch:active {
+            transform: scale(0.96);
+        }
+
+        #leaderboard .leaderboard-chart-mode-switch-thumb {
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 20px;
+            height: 18px;
+            border-radius: 9px;
+            background: #fff;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+            transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        #leaderboard .leaderboard-chart-mode-switch.is-count .leaderboard-chart-mode-switch-thumb {
+            transform: translateX(22px);
+        }
+
+        #leaderboard .leaderboard-chart-mode-switch-label {
+            position: relative;
+            z-index: 1;
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--lb-muted);
+            transition: color 0.2s ease;
+        }
+
+        #leaderboard .leaderboard-chart-mode-switch-label svg {
+            width: 11px;
+            height: 11px;
+        }
+
+        #leaderboard .leaderboard-chart-mode-switch:not(.is-count) .leaderboard-chart-mode-switch-label--percent,
+        #leaderboard .leaderboard-chart-mode-switch.is-count .leaderboard-chart-mode-switch-label--count {
+            color: var(--lb-accent);
+        }
+
+        #leaderboard .leaderboard-chart-mode-switch.is-count .leaderboard-chart-mode-switch-label--percent {
+            color: rgba(255, 255, 255, 0.85);
         }
 
         #leaderboard .leaderboard-chart-legend-item {
@@ -1277,6 +1370,69 @@
         #leaderboard .leaderboard-chart-crosshair {
             stroke: var(--lb-border);
             stroke-width: 1;
+        }
+
+        /* Drag-to-compare range brush */
+        #leaderboard .leaderboard-chart-canvas {
+            touch-action: none;
+        }
+
+        #leaderboard .leaderboard-chart-brush-rect {
+            fill: var(--lb-accent);
+            opacity: 0.12;
+            pointer-events: none;
+        }
+
+        #leaderboard .leaderboard-chart-brush-line {
+            stroke: var(--lb-accent);
+            stroke-width: 1.5;
+            pointer-events: none;
+        }
+
+        #leaderboard .leaderboard-chart-brush-hint {
+            margin-top: 6px;
+            font-size: 0.72em;
+            text-align: center;
+            opacity: 0.5;
+            min-height: 1.2em;
+        }
+
+        #leaderboard .leaderboard-range-banner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 10px;
+            padding: 6px 10px;
+            border-radius: 8px;
+            background: var(--lb-hover);
+            color: var(--lb-accent);
+            font-size: 0.8em;
+            font-weight: 600;
+        }
+
+        #leaderboard .leaderboard-range-clear {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: none;
+            width: 18px;
+            height: 18px;
+            padding: 0;
+            border: none;
+            border-radius: 50%;
+            background: transparent;
+            color: inherit;
+            cursor: pointer;
+        }
+
+        #leaderboard .leaderboard-range-clear:hover {
+            background: rgba(122, 75, 218, 0.15);
+        }
+
+        #leaderboard .leaderboard-range-clear svg {
+            width: 12px;
+            height: 12px;
         }
 
         #leaderboard .leaderboard-chart-tooltip {
@@ -1711,6 +1867,41 @@
         return percentOf(srsStageTotal(user), totalNumberOfWKItems);
     }
 
+    function historyEntryFor(username, dateKey) {
+        const entries = progressHistory[username] || [];
+        return entries.find(function (e) { return e.date === dateKey; }) || null;
+    }
+
+    //deltas for the currently-selected comparison range (see selectedDeltaRange), for one user --
+    //same units as the since-last-refresh deltas they replace in the table (raw level, percentage
+    //points for burn, raw item count for seen), just computed between the range's two endpoints
+    //instead of between refreshes. Returns null (no range active) or an object with a null field
+    //for any metric missing a snapshot at either endpoint -- deltaBadgeHtml already hides those.
+    function rangeDeltasFor(user) {
+        if (!selectedDeltaRange) { return null; }
+        const startEntry = historyEntryFor(user.name, selectedDeltaRange.start);
+        const endEntry = historyEntryFor(user.name, selectedDeltaRange.end);
+        if (!startEntry || !endEntry) { return { levelDelta: null, burnDelta: null, seenDelta: null }; }
+
+        const levelDelta = endEntry.level - startEntry.level;
+
+        const startBurn = typeof startEntry.burn === 'number' ? percentOf(startEntry.burn, totalNumberOfWKItems) : null;
+        const endBurn = typeof endEntry.burn === 'number' ? percentOf(endEntry.burn, totalNumberOfWKItems) : null;
+        const burnDelta = (startBurn !== null && endBurn !== null) ? Math.round((endBurn - startBurn) * 100) / 100 : null;
+
+        const startSeen = seenTotalFromHistoryEntry(startEntry);
+        const endSeen = seenTotalFromHistoryEntry(endEntry);
+        const seenDelta = (typeof startSeen === 'number' && typeof endSeen === 'number') ? endSeen - startSeen : null;
+
+        return { levelDelta: levelDelta, burnDelta: burnDelta, seenDelta: seenDelta };
+    }
+
+    function clearSelectedDeltaRange() {
+        if (!selectedDeltaRange) { return; }
+        selectedDeltaRange = null;
+        createLeaderboard();
+    }
+
     //horizontal stacked-bar chart comparing everyone's Apprentice/Guru/Master/Enlightened/Burned
     //counts. Bar length reflects each user's total items learned (relative to whoever has the
     //most); the colored segments within a bar show how those items are split across stages.
@@ -1789,14 +1980,20 @@
         return measured > 0 ? measured : 600;
     }
 
-    //generic line-over-time chart, one line per user (see usersForTrendChart), built from the
-    //daily snapshots recordProgressHistory() has been collecting. Seen%, Burn%, and Level are
-    //all just this with a different metric/scale -- see the wrappers below. valueFor(entry) pulls
-    //the plotted number out of a snapshot (and derives percentages from stored raw counts where
-    //needed); it should return undefined/non-number for a snapshot that can't supply this metric,
-    //which the chart treats as a gap rather than plotting a bogus point. deltaUnit is the suffix
-    //(e.g. '%') used when the tooltip shows change vs. the previous datapoint.
-    function buildLineTrendChartHtml(valueFor, yMax, yGridlineValues, formatValue, emptyMessage, deltaUnit) {
+    //generic line-over-time chart, one line per user (see usersForTrendChart), built from the daily
+    //snapshots recordProgressHistory() has been collecting. Seen%, Burn%, and Level are all just
+    //this with a different config -- see the wrappers below.
+    //  valueFor(entry)        pulls the plotted number out of a snapshot; return undefined/non-number
+    //                         for a snapshot that can't supply this metric (rendered as a gap)
+    //  yMax/yGridlineValues   the Y scale and where its gridlines fall
+    //  formatValue(v)         axis-label/tooltip text for a Y value
+    //  deltaUnit              suffix (e.g. '%') for the tooltip's change-vs-previous-point badge
+    //  showValueModeToggle    whether to show the %/# switch (see trendValueMode) -- only burn/seen
+    //                         have a meaningful "raw count" alternative to their percentage
+    function buildLineTrendChartHtml(config) {
+        const valueFor = config.valueFor, yMax = config.yMax, yGridlineValues = config.yGridlineValues,
+            formatValue = config.formatValue, emptyMessage = config.emptyMessage, deltaUnit = config.deltaUnit,
+            showValueModeToggle = config.showValueModeToggle;
         const trackedUsers = usersForTrendChart();
         const allDates = Array.from(new Set(
             trackedUsers.reduce(function (acc, user) {
@@ -1817,6 +2014,18 @@
         const plotLeft = 34, plotRight = width - 12, plotTop = 12, plotBottom = height - 26;
         const xFor = function (i) { return plotLeft + (i / (dates.length - 1)) * (plotRight - plotLeft); };
         const yFor = function (value) { return plotBottom - (Math.min(Math.max(value, 0), yMax) / yMax) * (plotBottom - plotTop); };
+
+        //the comparison range selected by dragging (see attachLineTrendChartInteractivity) is
+        //redrawn fresh on every render from selectedDeltaRange; the same rect/lines are also
+        //what the drag handlers reposition live while a drag is in progress
+        const brushDates = selectedDeltaRange ? [dates.indexOf(selectedDeltaRange.start), dates.indexOf(selectedDeltaRange.end)] : [-1, -1];
+        const hasBrush = brushDates[0] !== -1 && brushDates[1] !== -1;
+        const brushX1 = hasBrush ? xFor(Math.min(brushDates[0], brushDates[1])) : 0;
+        const brushX2 = hasBrush ? xFor(Math.max(brushDates[0], brushDates[1])) : 0;
+        const brushHiddenStyle = hasBrush ? '' : 'display:none';
+        const brushHtml = `<rect class="leaderboard-chart-brush-rect" x="${brushX1}" y="${plotTop}" width="${brushX2 - brushX1}" height="${plotBottom - plotTop}" style="${brushHiddenStyle}" />
+            <line class="leaderboard-chart-brush-line leaderboard-chart-brush-line--start" x1="${brushX1}" y1="${plotTop}" x2="${brushX1}" y2="${plotBottom}" style="${brushHiddenStyle}" />
+            <line class="leaderboard-chart-brush-line leaderboard-chart-brush-line--end" x1="${brushX2}" y1="${plotTop}" x2="${brushX2}" y2="${plotBottom}" style="${brushHiddenStyle}" />`;
 
         const gridlinesHtml = yGridlineValues.map(function (value) {
             const y = yFor(value);
@@ -1859,10 +2068,29 @@
             </span>`;
         }).join('');
 
+        const modeToggleHtml = showValueModeToggle ? `<button type="button"
+            class="leaderboard-chart-mode-switch${trendValueMode === 'count' ? ' is-count' : ''}"
+            data-trend-mode="${trendValueMode === 'percent' ? 'count' : 'percent'}"
+            title="${trendValueMode === 'percent' ? 'Show as item count' : 'Show as percentage'}"
+            aria-label="Show as ${trendValueMode === 'percent' ? 'percentage' : 'item count'}"
+            aria-pressed="${trendValueMode === 'count'}">
+            <span class="leaderboard-chart-mode-switch-thumb"></span>
+            <span class="leaderboard-chart-mode-switch-label leaderboard-chart-mode-switch-label--percent">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.2"/><circle cx="17.5" cy="17.5" r="2.2"/></svg>
+            </span>
+            <span class="leaderboard-chart-mode-switch-label leaderboard-chart-mode-switch-label--count">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>
+            </span>
+        </button>` : '';
+
         return `<div class="leaderboard-chart">
-            <div class="leaderboard-chart-legend">${legendHtml}</div>
+            <div class="leaderboard-chart-header">
+                <div class="leaderboard-chart-legend">${legendHtml}</div>
+                ${modeToggleHtml}
+            </div>
             <div class="leaderboard-chart-svg-wrap">
                 <svg viewBox="0 0 ${width} ${height}" class="leaderboard-chart-canvas" preserveAspectRatio="none">
+                    ${brushHtml}
                     ${gridlinesHtml}
                     ${xLabelsHtml}
                     ${linesHtml}
@@ -1870,33 +2098,64 @@
                 </svg>
                 <div class="leaderboard-chart-tooltip" style="display:none"></div>
             </div>
+            <div class="leaderboard-chart-brush-hint" style="${hasBrush ? 'display:none' : ''}">${hasBrush ? '' : 'Drag across the chart to compare two dates'}</div>
         </div>`;
     }
 
     const trendNoHistoryMessage = 'Come back after a couple more refreshes on different days — the trend chart needs at least two days of history to draw a line.';
 
-    function buildBurnTrendChartHtml() {
-        return buildLineTrendChartHtml(
-            function (entry) { return typeof entry.burn === 'number' ? percentOf(entry.burn, totalNumberOfWKItems) : undefined; },
-            100, [0, 25, 50, 75, 100], function (v) { return v + '%'; }, trendNoHistoryMessage, '%'
-        );
+    //four evenly-spaced gridline values from 0 to max, rounded to the nearest 100 for a readable axis
+    function quarterGridlines(max) {
+        return [0, 0.25, 0.5, 0.75, 1].map(function (fraction) { return Math.round(max * fraction / 100) * 100; });
     }
 
-    function buildLevelTrendChartHtml() {
-        return buildLineTrendChartHtml(
-            function (entry) { return entry.level; },
-            60, [0, 15, 30, 45, 60], function (v) { return String(v); }, trendNoHistoryMessage, ''
-        );
+    //shared by the burn%/seen% trend charts, which can each show either % of all WK items or the
+    //raw item count (see trendValueMode -- toggled via the chart's own %/# switch). rawValueFor
+    //pulls the raw count out of a snapshot; percentOf() derives the percentage from it on demand.
+    function buildPercentOrCountTrendChartHtml(rawValueFor) {
+        if (trendValueMode === 'count') {
+            return buildLineTrendChartHtml({
+                valueFor: rawValueFor,
+                yMax: totalNumberOfWKItems,
+                yGridlineValues: quarterGridlines(totalNumberOfWKItems),
+                formatValue: function (v) { return Math.round(v).toLocaleString(); },
+                emptyMessage: trendNoHistoryMessage,
+                deltaUnit: '',
+                showValueModeToggle: true,
+            });
+        }
+        return buildLineTrendChartHtml({
+            valueFor: function (entry) {
+                const raw = rawValueFor(entry);
+                return typeof raw === 'number' ? percentOf(raw, totalNumberOfWKItems) : undefined;
+            },
+            yMax: 100,
+            yGridlineValues: [0, 25, 50, 75, 100],
+            formatValue: function (v) { return v + '%'; },
+            emptyMessage: trendNoHistoryMessage,
+            deltaUnit: '%',
+            showValueModeToggle: true,
+        });
+    }
+
+    function buildBurnTrendChartHtml() {
+        return buildPercentOrCountTrendChartHtml(function (entry) { return typeof entry.burn === 'number' ? entry.burn : undefined; });
     }
 
     function buildSeenTrendChartHtml() {
-        return buildLineTrendChartHtml(
-            function (entry) {
-                const total = seenTotalFromHistoryEntry(entry);
-                return typeof total === 'number' ? percentOf(total, totalNumberOfWKItems) : undefined;
-            },
-            100, [0, 25, 50, 75, 100], function (v) { return v + '%'; }, trendNoHistoryMessage, '%'
-        );
+        return buildPercentOrCountTrendChartHtml(seenTotalFromHistoryEntry);
+    }
+
+    function buildLevelTrendChartHtml() {
+        return buildLineTrendChartHtml({
+            valueFor: function (entry) { return entry.level; },
+            yMax: 60,
+            yGridlineValues: [0, 15, 30, 45, 60],
+            formatValue: function (v) { return String(v); },
+            emptyMessage: trendNoHistoryMessage,
+            deltaUnit: '',
+            showValueModeToggle: false,
+        });
     }
 
     //vertical crosshair that snaps to the nearest date + a tooltip listing every user's
@@ -1907,7 +2166,11 @@
         const svg = document.querySelector('#leaderboard .leaderboard-chart-canvas');
         const tooltip = document.querySelector('#leaderboard .leaderboard-chart-tooltip');
         const crosshair = document.querySelector('#leaderboard .leaderboard-chart-crosshair');
-        if (!svg || !tooltip || !crosshair) { return; }
+        const brushRect = document.querySelector('#leaderboard .leaderboard-chart-brush-rect');
+        const brushLineStart = document.querySelector('#leaderboard .leaderboard-chart-brush-line--start');
+        const brushLineEnd = document.querySelector('#leaderboard .leaderboard-chart-brush-line--end');
+        const brushHint = document.querySelector('#leaderboard .leaderboard-chart-brush-hint');
+        if (!svg || !tooltip || !crosshair || !brushRect || !brushLineStart || !brushLineEnd) { return; }
 
         const chart = lastLineTrendChart;
 
@@ -1961,10 +2224,65 @@
             return point.matrixTransform(svg.getScreenCTM().inverse()).x;
         }
 
+        //click-and-drag range selection (see selectedDeltaRange). Uses pointer capture rather than
+        //a window-level listener so pointerup/pointermove keep firing on this exact svg even if the
+        //cursor leaves it mid-drag, and so nothing needs manual cleanup -- the svg (and its
+        //listeners) are simply thrown away on the next createLeaderboard() re-render.
+        let isDragging = false;
+        let dragStartIndex = 0;
+
+        function setBrushBounds(index1, index2) {
+            const x1 = chart.xFor(Math.min(index1, index2));
+            const x2 = chart.xFor(Math.max(index1, index2));
+            brushRect.setAttribute('x', x1);
+            brushRect.setAttribute('width', x2 - x1);
+            brushLineStart.setAttribute('x1', x1); brushLineStart.setAttribute('x2', x1);
+            brushLineEnd.setAttribute('x1', x2); brushLineEnd.setAttribute('x2', x2);
+            [brushRect, brushLineStart, brushLineEnd].forEach(function (el) { el.style.display = ''; });
+        }
+
+        svg.addEventListener('pointerdown', function (pointerEvent) {
+            isDragging = true;
+            svg.setPointerCapture(pointerEvent.pointerId);
+            dragStartIndex = nearestDateIndex(pointerToViewBoxX(pointerEvent));
+            setBrushBounds(dragStartIndex, dragStartIndex);
+            tooltip.style.display = 'none';
+            crosshair.style.display = 'none';
+            //re-show the hint (hidden at render time once a range is already selected -- see
+            //buildLineTrendChartHtml) so the live date-range readout has somewhere to appear
+            if (brushHint) { brushHint.style.display = ''; }
+        });
+
         svg.addEventListener('pointermove', function (pointerEvent) {
+            if (isDragging) {
+                const currentIndex = nearestDateIndex(pointerToViewBoxX(pointerEvent));
+                setBrushBounds(dragStartIndex, currentIndex);
+                if (brushHint && currentIndex !== dragStartIndex) {
+                    const lo = Math.min(dragStartIndex, currentIndex), hi = Math.max(dragStartIndex, currentIndex);
+                    brushHint.textContent = formatShortDate(chart.dates[lo]) + ' → ' + formatShortDate(chart.dates[hi]);
+                }
+                return;
+            }
             showAt(nearestDateIndex(pointerToViewBoxX(pointerEvent)), pointerEvent);
         });
+
+        svg.addEventListener('pointerup', function (pointerEvent) {
+            if (!isDragging) { return; }
+            isDragging = false;
+            svg.releasePointerCapture(pointerEvent.pointerId);
+            const endIndex = nearestDateIndex(pointerToViewBoxX(pointerEvent));
+            if (endIndex === dragStartIndex) {
+                //no real drag happened -- treat it as a click that dismisses any existing selection
+                clearSelectedDeltaRange();
+                return;
+            }
+            const lo = Math.min(dragStartIndex, endIndex), hi = Math.max(dragStartIndex, endIndex);
+            selectedDeltaRange = { start: chart.dates[lo], end: chart.dates[hi] };
+            createLeaderboard();
+        });
+
         svg.addEventListener('pointerleave', function () {
+            if (isDragging) { return; }
             crosshair.style.display = 'none';
             tooltip.style.display = 'none';
         });
@@ -2016,6 +2334,12 @@
                 const seenPercentage = seenPercentageFor(user);
                 const seenTooltip = `Seen: ${seenTotal} / ${totalNumberOfWKItems} (${seenPercentage}%)`;
 
+                //a selected chart date-range overrides the normal since-last-refresh deltas
+                const rangeDeltas = rangeDeltasFor(user);
+                const levelDeltaToShow = rangeDeltas ? rangeDeltas.levelDelta : user.levelDelta;
+                const seenDeltaToShow = rangeDeltas ? rangeDeltas.seenDelta : user.srsTotalDelta;
+                const burnDeltaToShow = rangeDeltas ? rangeDeltas.burnDelta : user.burnDelta;
+
                 rowsHtml += `<tr>
                     <td class="leaderboard-col-rank" title="${escapeHtml(wkRealmNames[user.realm_number])}">
                         <span class="leaderboard-rank-num">#${j + 1}</span>
@@ -2029,18 +2353,18 @@
                             <span class="leaderboard-user-name leaderboardSpan">${displayName}</span>
                             ${achievementIconHtml(user)}
                             <span class="leaderboard-level-badge">${user.level}</span>
-                            ${deltaBadgeHtml(user.levelDelta, '')}
+                            ${deltaBadgeHtml(levelDeltaToShow, '')}
                         </a>
                     </td>
                     <td class="leaderboard-col-seen" title="${escapeHtml(seenTooltip)}">
                         <div class="leaderboard-seen-track"><div class="leaderboard-seen-fill" style="width:${Math.min(seenPercentage, 100)}%"></div></div>
                         <span class="leaderboard-seen-value">${seenTotal} seen</span>
-                        ${deltaBadgeHtml(user.srsTotalDelta, '')}
+                        ${deltaBadgeHtml(seenDeltaToShow, '')}
                     </td>
                     <td class="leaderboard-col-burn" title="${escapeHtml(burnTooltip)}">
                         <div class="leaderboard-burn-track"><div class="leaderboard-burn-fill" style="width:${Math.min(user.totalBurnPercentage, 100)}%"></div></div>
                         <span class="leaderboard-burn-label">${user.totalBurnPercentage}% burned</span>
-                        ${deltaBadgeHtml(user.burnDelta, '%')}
+                        ${deltaBadgeHtml(burnDeltaToShow, '%')}
                     </td>
                     <td class="leaderboard-col-actions">
                         <span class="${escapeHtml(user.name)} leaderboard-delete-btn" title="Remove ${displayName}">
@@ -2062,7 +2386,15 @@
                 <button type="button" class="leaderboard-empty-add-btn">Add a user</button>
             </div>`;
         } else {
+            const rangeBannerHtml = selectedDeltaRange ? `<div class="leaderboard-range-banner">
+                <span>Comparing ${escapeHtml(formatShortDate(selectedDeltaRange.start))} → ${escapeHtml(formatShortDate(selectedDeltaRange.end))}</span>
+                <button type="button" class="leaderboard-range-clear" title="Clear comparison range">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                </button>
+            </div>` : '';
+
             contentHtml = `<div class="leaderboard-table-card">
+                ${rangeBannerHtml}
                 <table>
                     <thead>
                         <tr>
@@ -2157,9 +2489,28 @@
             });
         });
 
+        const modeSwitch = document.querySelector('#leaderboard .leaderboard-chart-mode-switch');
+        if (modeSwitch) modeSwitch.addEventListener('click', function () {
+            //flip the switch's own class immediately so its slide transition actually plays on this
+            //element -- createLeaderboard() tears down and rebuilds the whole card, so if the mode
+            //were only set on trendValueMode here, the thumb would just appear in its new position
+            //with nothing to animate from. The chart data swap is inherently an instant cut (a
+            //percent-vs-count axis rescale isn't something to tween), so it's delayed just long
+            //enough for the switch's own animation to finish first.
+            const newMode = modeSwitch.dataset.trendMode;
+            modeSwitch.classList.toggle('is-count', newMode === 'count');
+            modeSwitch.setAttribute('aria-pressed', String(newMode === 'count'));
+            trendValueMode = newMode;
+            saveToCache(CACHE_KEY_TREND_VALUE_MODE, trendValueMode);
+            setTimeout(createLeaderboard, 250);
+        });
+
         if (showChartsPanel && (activeChartTab === 'seenTrend' || activeChartTab === 'burnTrend' || activeChartTab === 'levelTrend')) {
             attachLineTrendChartInteractivity();
         }
+
+        const rangeClearBtn = document.querySelector('#leaderboard .leaderboard-range-clear');
+        if (rangeClearBtn) rangeClearBtn.addEventListener('click', clearSelectedDeltaRange);
 
         const exportBtn = document.querySelector('#leaderboard .leaderboard-export');
         if (exportBtn) exportBtn.addEventListener('click', exportUsers);
@@ -2175,6 +2526,11 @@
             element.addEventListener('click', deleteUser);
         });
     }
+
+    //global, added once (not per-render, unlike the rest of createLeaderboard()'s listeners)
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') { clearSelectedDeltaRange(); }
+    });
 
     startup();
 })();
