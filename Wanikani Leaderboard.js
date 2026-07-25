@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wanikani Leaderboard 2 (2026 Fix)
 // @namespace    http://tampermonkey.net/
-// @version      3.0.3
+// @version      3.0.4
 // @description  Get levels from usernames and order them in a competitive list
 // @author       crazyfluff, faraplay, Dani2
 // @include      https://www.wanikani.com/dashboard
@@ -1777,13 +1777,26 @@
     //attachLineTrendChartInteractivity() afterward so the hover logic doesn't recompute them
     var lastLineTrendChart = null;
 
+    //the SVG viewBox width must match the canvas's real rendered pixel width, or
+    //preserveAspectRatio="none" (needed so the chart fills the card at a fixed height) stretches
+    //X and Y by different factors -- which distorts the axis-label text along with everything
+    //else. Measuring an existing chart-tab-content element (present once the panel has been shown
+    //on any tab) keeps the viewBox 1:1 with reality; 600 is only a first-render fallback before
+    //that element has ever existed, and self-corrects on the next re-render.
+    function measuredChartWidth() {
+        const existing = document.querySelector('#leaderboard .leaderboard-chart-tab-content');
+        const measured = existing ? existing.clientWidth : 0;
+        return measured > 0 ? measured : 600;
+    }
+
     //generic line-over-time chart, one line per user (see usersForTrendChart), built from the
     //daily snapshots recordProgressHistory() has been collecting. Seen%, Burn%, and Level are
     //all just this with a different metric/scale -- see the wrappers below. valueFor(entry) pulls
     //the plotted number out of a snapshot (and derives percentages from stored raw counts where
     //needed); it should return undefined/non-number for a snapshot that can't supply this metric,
-    //which the chart treats as a gap rather than plotting a bogus point.
-    function buildLineTrendChartHtml(valueFor, yMax, yGridlineValues, formatValue, emptyMessage) {
+    //which the chart treats as a gap rather than plotting a bogus point. deltaUnit is the suffix
+    //(e.g. '%') used when the tooltip shows change vs. the previous datapoint.
+    function buildLineTrendChartHtml(valueFor, yMax, yGridlineValues, formatValue, emptyMessage, deltaUnit) {
         const trackedUsers = usersForTrendChart();
         const allDates = Array.from(new Set(
             trackedUsers.reduce(function (acc, user) {
@@ -1800,7 +1813,7 @@
             return `<div class="leaderboard-chart-empty">${escapeHtml(emptyMessage)}</div>`;
         }
 
-        const width = 600, height = 220;
+        const width = measuredChartWidth(), height = 190;
         const plotLeft = 34, plotRight = width - 12, plotTop = 12, plotBottom = height - 26;
         const xFor = function (i) { return plotLeft + (i / (dates.length - 1)) * (plotRight - plotLeft); };
         const yFor = function (value) { return plotBottom - (Math.min(Math.max(value, 0), yMax) / yMax) * (plotBottom - plotTop); };
@@ -1831,7 +1844,7 @@
             return { name: user.name, color: color, points: points };
         }).filter(function (series) { return series.points.length > 0; });
 
-        lastLineTrendChart = { dates: dates, xFor: xFor, plotTop: plotTop, plotBottom: plotBottom, series: series, formatValue: formatValue };
+        lastLineTrendChart = { dates: dates, xFor: xFor, plotTop: plotTop, plotBottom: plotBottom, series: series, formatValue: formatValue, deltaUnit: deltaUnit };
 
         const linesHtml = series.map(function (s) {
             const pathD = s.points.map(function (p, idx) { return (idx === 0 ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1); }).join(' ');
@@ -1865,14 +1878,14 @@
     function buildBurnTrendChartHtml() {
         return buildLineTrendChartHtml(
             function (entry) { return typeof entry.burn === 'number' ? percentOf(entry.burn, totalNumberOfWKItems) : undefined; },
-            100, [0, 25, 50, 75, 100], function (v) { return v + '%'; }, trendNoHistoryMessage
+            100, [0, 25, 50, 75, 100], function (v) { return v + '%'; }, trendNoHistoryMessage, '%'
         );
     }
 
     function buildLevelTrendChartHtml() {
         return buildLineTrendChartHtml(
             function (entry) { return entry.level; },
-            60, [0, 15, 30, 45, 60], function (v) { return String(v); }, trendNoHistoryMessage
+            60, [0, 15, 30, 45, 60], function (v) { return String(v); }, trendNoHistoryMessage, ''
         );
     }
 
@@ -1882,7 +1895,7 @@
                 const total = seenTotalFromHistoryEntry(entry);
                 return typeof total === 'number' ? percentOf(total, totalNumberOfWKItems) : undefined;
             },
-            100, [0, 25, 50, 75, 100], function (v) { return v + '%'; }, trendNoHistoryMessage
+            100, [0, 25, 50, 75, 100], function (v) { return v + '%'; }, trendNoHistoryMessage, '%'
         );
     }
 
@@ -1916,12 +1929,16 @@
 
             const date = chart.dates[index];
             const rowsHtml = chart.series.map(function (s) {
-                const point = s.points.find(function (p) { return p.date === date; });
-                if (!point) { return ''; }
+                const pointIndex = s.points.findIndex(function (p) { return p.date === date; });
+                if (pointIndex === -1) { return ''; }
+                const point = s.points[pointIndex];
+                const previousPoint = pointIndex > 0 ? s.points[pointIndex - 1] : null;
+                const delta = previousPoint ? Math.round((point.value - previousPoint.value) * 100) / 100 : null;
                 return `<div class="leaderboard-chart-tooltip-row">
                     <span class="leaderboard-chart-tooltip-swatch" style="background:${s.color}"></span>
                     <span class="leaderboard-chart-tooltip-name">${escapeHtml(s.name)}</span>
                     <span class="leaderboard-chart-tooltip-value">${escapeHtml(chart.formatValue(point.value))}</span>
+                    ${deltaBadgeHtml(delta, chart.deltaUnit)}
                 </div>`;
             }).join('');
             tooltip.innerHTML = `<div class="leaderboard-chart-tooltip-date">${escapeHtml(formatShortDate(date))}</div>${rowsHtml}`;
@@ -1958,7 +1975,7 @@
     function buildChartsPanelHtml() {
         const tabs = [
             { key: 'srsStages', label: 'SRS Stages' },
-            { key: 'seenTrend', label: 'Seen' },
+            { key: 'seenTrend', label: 'Seen %' },
             { key: 'burnTrend', label: 'Burn %' },
             { key: 'levelTrend', label: 'Level' },
         ];
