@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wanikani Leaderboard 2 (2026 Fix)
 // @namespace    http://tampermonkey.net/
-// @version      3.3.1
+// @version      3.3.2
 // @description  Get levels from usernames and order them in a competitive list
 // @author       crazyfluff, faraplay, Dani2
 // @include      https://www.wanikani.com/dashboard
@@ -2356,13 +2356,20 @@
                 if (Object.prototype.hasOwnProperty.call(byDate, date)) { rawPoints.push({ i: i, date: date, value: byDate[date] }); }
             });
 
+            //walk every real point (i >= 0) and diff it against whatever came before. The window's
+            //own first date always gets plotted: if a day-before-window baseline exists it gets a
+            //real delta, otherwise it's treated as the window's zero/reference point (delta 0) rather
+            //than being silently consumed as a throwaway baseline for the second point.
             const deltaPoints = [];
             let cumulative = 0;
-            for (let k = 1; k < rawPoints.length; k++) {
-                const delta = Math.round((rawPoints[k].value - rawPoints[k - 1].value) * 100) / 100;
+            let previousValue = null;
+            rawPoints.forEach(function (point) {
+                if (point.i === -1) { previousValue = point.value; return; }
+                const delta = Math.round(((previousValue === null ? 0 : point.value - previousValue)) * 100) / 100;
                 cumulative = Math.round((cumulative + delta) * 100) / 100;
-                deltaPoints.push({ i: rawPoints[k].i, date: rawPoints[k].date, delta: delta, cumulative: cumulative });
-            }
+                deltaPoints.push({ i: point.i, date: point.date, delta: delta, cumulative: cumulative });
+                previousValue = point.value;
+            });
             return { name: user.name, color: color, deltaPoints: deltaPoints };
         }).filter(function (u) { return u.deltaPoints.length > 0; });
 
