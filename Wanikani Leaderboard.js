@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wanikani Leaderboard 2 (2026 Fix)
 // @namespace    http://tampermonkey.net/
-// @version      3.4.0
+// @version      3.4.1
 // @description  Get levels from usernames and order them in a competitive list
 // @author       crazyfluff, faraplay, Dani2
 // @include      https://www.wanikani.com/dashboard
@@ -905,7 +905,9 @@
 
         /* Rank + realm */
         #leaderboard td.leaderboard-col-rank {
-            width: 52px;
+            width: 60px;
+            padding-left: 4px;
+            padding-right: 4px;
             text-align: center;
         }
 
@@ -916,13 +918,17 @@
             opacity: 0.45;
         }
 
+        /* Two-character realm names (地獄, 天国, 現実) are as wide as the badge gets -- nowrap keeps
+           them on one line instead of stacking each character, and the column above is sized/padded
+           to fit that widest case without cutting into the next column */
         #leaderboard .leaderboard-realm-badge {
             display: inline-block;
             margin-top: 2px;
-            padding: 2px 6px;
+            padding: 2px 5px;
             border-radius: 6px;
             font-size: 0.82em;
             line-height: 1.3;
+            white-space: nowrap;
             background: var(--lb-hover);
         }
 
@@ -962,6 +968,11 @@
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+            /* overflow:hidden clips to the line box, and this inherits WK's own (tighter than the
+               font needs) line-height -- too short a box crops descenders (g/q/y/j) even though the
+               text itself never wraps. line-height:1.3 matches the realm badge above and gives the
+               glyphs' full vertical extent room inside the clipped box. */
+            line-height: 1.3;
         }
 
         #leaderboard .leaderboard-level-badge {
