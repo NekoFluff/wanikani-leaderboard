@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wanikani Leaderboard 2 (2026 Fix)
 // @namespace    http://tampermonkey.net/
-// @version      3.3.0
+// @version      3.3.1
 // @description  Get levels from usernames and order them in a competitive list
 // @author       crazyfluff, faraplay, Dani2
 // @include      https://www.wanikani.com/dashboard
@@ -1921,9 +1921,29 @@
         return percentOf(srsStageTotal(user), totalNumberOfWKItems);
     }
 
-    function historyEntryFor(username, dateKey) {
+    //the recorded snapshot closest to dateKey for this user -- exact match if one exists,
+    //otherwise clamped to the earliest/latest entry if dateKey falls outside recorded history, or
+    //the nearest neighbor if it falls in a gap between two recorded days. The chart's window is
+    //padded to its full preset span (see windowAndDownsampleDates), so it's easy to drag-select a
+    //date that predates all available history -- clamping means that comparison still resolves to
+    //something meaningful (effectively "since the earliest data we have") instead of coming back
+    //empty just because the exact date wasn't recorded.
+    function nearestHistoryEntryFor(username, dateKey) {
         const entries = progressHistory[username] || [];
-        return entries.find(function (e) { return e.date === dateKey; }) || null;
+        if (entries.length === 0) { return null; }
+
+        const exact = entries.find(function (e) { return e.date === dateKey; });
+        if (exact) { return exact; }
+        if (dateKey < entries[0].date) { return entries[0]; }
+        if (dateKey > entries[entries.length - 1].date) { return entries[entries.length - 1]; }
+
+        let closest = entries[0];
+        let closestDiff = Infinity;
+        entries.forEach(function (e) {
+            const diff = Math.abs(new Date(e.date + 'T00:00:00') - new Date(dateKey + 'T00:00:00'));
+            if (diff < closestDiff) { closestDiff = diff; closest = e; }
+        });
+        return closest;
     }
 
     //deltas for the currently-selected comparison range (see selectedDeltaRange), for one user --
@@ -1933,8 +1953,8 @@
     //for any metric missing a snapshot at either endpoint -- deltaBadgeHtml already hides those.
     function rangeDeltasFor(user) {
         if (!selectedDeltaRange) { return null; }
-        const startEntry = historyEntryFor(user.name, selectedDeltaRange.start);
-        const endEntry = historyEntryFor(user.name, selectedDeltaRange.end);
+        const startEntry = nearestHistoryEntryFor(user.name, selectedDeltaRange.start);
+        const endEntry = nearestHistoryEntryFor(user.name, selectedDeltaRange.end);
         if (!startEntry || !endEntry) { return { levelDelta: null, burnDelta: null, seenDelta: null }; }
 
         const levelDelta = endEntry.level - startEntry.level;
