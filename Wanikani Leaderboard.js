@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wanikani Leaderboard 2 (2026 Fix)
 // @namespace    http://tampermonkey.net/
-// @version      3.3.2
+// @version      3.4.0
 // @description  Get levels from usernames and order them in a competitive list
 // @author       crazyfluff, faraplay, Dani2
 // @include      https://www.wanikani.com/dashboard
@@ -218,6 +218,15 @@
     var activeChartTab = 'srsStages';//'srsStages' | 'seenTrend' | 'burnTrend' | 'levelTrend' -- which chart tab is showing
     var trendValueMode = 'count';//'percent' | 'count' -- burn/seen trend charts' %/# switch
     var trendWindowPreset = '1M';//'1M' | '3M' | '6M' | '1Y' | 'All' -- how far back the trend charts show
+    //explicit user picks for the trend charts (see the Users picker in the chart header), only
+    //consulted once there are more tracked users than trendChartPalette has colors for -- below
+    //that there's nothing to filter, so every user always charts. null/empty means "no explicit
+    //pick yet", which falls back to the first N alphabetically (usersForTrendChart's old, only
+    //behavior before this picker existed)
+    var trendChartSelectedUsers = null;//string[] of usernames | null
+    //whether the Users picker popover is open -- ephemeral UI state, not persisted, same as
+    //selectedDeltaRange below
+    var chartUsersPickerOpen = false;
     //raw per-stage counts, not percentages, are stored -- burn%/seen% are derived at render time
     //against the current totalNumberOfWKItems (see percentOf), so historical points stay consistent
     //with today's catalog size instead of being frozen at whatever total existed when recorded, and
@@ -241,6 +250,7 @@
     const CACHE_KEY_TIME_SINCE_LAST_REFRESH = 'wkof.settings.leaderboard_timeSinceLastRefresh';
     const CACHE_KEY_TREND_VALUE_MODE = 'wkof.settings.leaderboard_trendValueMode';
     const CACHE_KEY_TREND_WINDOW_PRESET = 'wkof.settings.leaderboard_trendWindowPreset';
+    const CACHE_KEY_TREND_SELECTED_USERS = 'wkof.settings.leaderboard_trendSelectedUsers';
 
     //generic cache helpers used for every simple setting below
     function saveToCache(key, value) {
@@ -699,6 +709,11 @@
 
         loadFromCache(CACHE_KEY_TREND_WINDOW_PRESET, '1M').then(function (result) {
             trendWindowPreset = result;
+            createLeaderboard();
+        });
+
+        loadFromCache(CACHE_KEY_TREND_SELECTED_USERS, null).then(function (result) {
+            trendChartSelectedUsers = result;
             createLeaderboard();
         });
 
@@ -1333,6 +1348,80 @@
             align-items: center;
             flex: none;
             gap: 8px;
+        }
+
+        #leaderboard .leaderboard-chart-users-picker {
+            position: relative;
+            flex: none;
+        }
+
+        #leaderboard .leaderboard-chart-users-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            border: 0.5px solid var(--lb-border);
+            border-radius: 999px;
+            background: transparent;
+            padding: 3px 9px;
+            color: var(--lb-muted);
+            cursor: pointer;
+        }
+
+        #leaderboard .leaderboard-chart-users-btn svg {
+            width: 13px;
+            height: 13px;
+        }
+
+        #leaderboard .leaderboard-chart-users-btn:hover,
+        #leaderboard .leaderboard-chart-users-btn.is-active {
+            color: var(--lb-accent);
+            border-color: var(--lb-accent);
+        }
+
+        #leaderboard .leaderboard-chart-users-count {
+            font-size: 0.68em;
+            font-weight: 600;
+        }
+
+        #leaderboard .leaderboard-chart-users-popover {
+            position: absolute;
+            z-index: 2;
+            top: calc(100% + 6px);
+            right: 0;
+            min-width: 160px;
+            max-height: 220px;
+            overflow-y: auto;
+            padding: 6px;
+            border: 1px solid rgb(202, 208, 214);
+            border-radius: 10px;
+            background: #fff;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+        }
+
+        #leaderboard .leaderboard-chart-users-popover-hint {
+            padding: 2px 6px 6px;
+            font-size: 0.68em;
+            color: var(--lb-muted);
+        }
+
+        #leaderboard .leaderboard-chart-users-option {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 6px;
+            border-radius: 6px;
+            font-size: 0.8em;
+            color: #333;
+            cursor: pointer;
+        }
+
+        #leaderboard .leaderboard-chart-users-option:hover {
+            background: var(--lb-hover);
+        }
+
+        #leaderboard .leaderboard-chart-users-option.is-disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
         }
 
         #leaderboard .leaderboard-chart-range-toggle {
@@ -2038,14 +2127,25 @@
         return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     }
 
-    //which users get a line on the trend chart: alphabetical (stable regardless of the
-    //leaderboard's live sort order, so a user's color/position here never shifts just
-    //because Sort Order changed), capped at the palette size.
+    //every tracked user, alphabetical (stable regardless of the leaderboard's live sort order, so
+    //a user's color/position on the chart never shifts just because Sort Order changed)
+    function sortedTrendUsers() {
+        return usersInfoList.slice().sort(function (a, b) { return a.name.localeCompare(b.name, 'en'); });
+    }
+
+    //which users get a line on the trend chart, capped at the palette size. An explicit pick from
+    //the Users picker (trendChartSelectedUsers) always wins when one exists, whether or not the
+    //account is even over the cap -- the picker also doubles as a general "declutter the chart"
+    //filter. With no pick (or a stale one -- e.g. every selected user got deleted), falls back to
+    //the first N alphabetically, same as this function's only behavior before the picker existed.
     function usersForTrendChart() {
-        return usersInfoList
-            .slice()
-            .sort(function (a, b) { return a.name.localeCompare(b.name, 'en'); })
-            .slice(0, trendChartPalette.length);
+        const sorted = sortedTrendUsers();
+        if (trendChartSelectedUsers && trendChartSelectedUsers.length > 0) {
+            const selectedSet = new Set(trendChartSelectedUsers);
+            const filtered = sorted.filter(function (u) { return selectedSet.has(u.name); });
+            if (filtered.length > 0) { return filtered.slice(0, trendChartPalette.length); }
+        }
+        return sorted.slice(0, trendChartPalette.length);
     }
 
     //holds the scales/series from the most recent buildLineTrendChartHtml() call, read by
@@ -2177,6 +2277,34 @@
         </div>`;
     }
 
+    //lets the user choose which users chart, whether that's trimming an over-the-cap account down
+    //to trendChartPalette.length or just decluttering a smaller one -- hidden only when there's
+    //nothing to pick between (0 or 1 tracked users)
+    function buildUsersPickerHtml() {
+        const allUsers = sortedTrendUsers();
+        if (allUsers.length <= 1) { return ''; }
+        const chartedNames = new Set(usersForTrendChart().map(function (u) { return u.name; }));
+        const atCap = chartedNames.size >= trendChartPalette.length;
+        const optionsHtml = allUsers.map(function (u) {
+            const checked = chartedNames.has(u.name);
+            const disabled = !checked && atCap;
+            return `<label class="leaderboard-chart-users-option${disabled ? ' is-disabled' : ''}">
+                <input type="checkbox" data-chart-user="${escapeHtml(u.name)}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''} />
+                <span>${escapeHtml(u.name)}</span>
+            </label>`;
+        }).join('');
+        return `<div class="leaderboard-chart-users-picker">
+            <button type="button" class="leaderboard-chart-users-btn${chartUsersPickerOpen ? ' is-active' : ''}" title="Choose which users to chart" aria-expanded="${chartUsersPickerOpen}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                <span class="leaderboard-chart-users-count">${chartedNames.size}/${trendChartPalette.length}</span>
+            </button>
+            <div class="leaderboard-chart-users-popover" style="${chartUsersPickerOpen ? '' : 'display:none'}">
+                <div class="leaderboard-chart-users-popover-hint">Chart shows up to ${trendChartPalette.length} users</div>
+                ${optionsHtml}
+            </div>
+        </div>`;
+    }
+
     //wraps a chart's marks/legend into the shared card shell (header with legend+toggles, svg with
     //brush/gridlines/x-labels/marks/crosshair, tooltip, brush hint)
     function buildTrendChartCardHtml(config) {
@@ -2184,6 +2312,7 @@
             <div class="leaderboard-chart-header">
                 <div class="leaderboard-chart-legend">${config.legendHtml}</div>
                 <div class="leaderboard-chart-header-controls">
+                    ${buildUsersPickerHtml()}
                     ${buildModeToggleHtml(config.showValueModeToggle)}
                     ${buildRangeToggleHtml()}
                 </div>
@@ -2758,6 +2887,7 @@
         const chartsToggleBtn = document.querySelector('#leaderboard .leaderboard-charts-toggle');
         if (chartsToggleBtn) chartsToggleBtn.addEventListener('click', function () {
             showChartsPanel = !showChartsPanel;
+            chartUsersPickerOpen = false;
             saveToCache(CACHE_KEY_CHARTS_OPEN, showChartsPanel);
             createLeaderboard();
         });
@@ -2765,6 +2895,7 @@
         document.querySelectorAll('#leaderboard .leaderboard-chart-tab').forEach(function (tabBtn) {
             tabBtn.addEventListener('click', function () {
                 activeChartTab = tabBtn.dataset.chartTab;
+                chartUsersPickerOpen = false;
                 saveToCache(CACHE_KEY_ACTIVE_CHART_TAB, activeChartTab);
                 createLeaderboard();
             });
@@ -2794,6 +2925,34 @@
             });
         });
 
+        const usersPickerBtn = document.querySelector('#leaderboard .leaderboard-chart-users-btn');
+        if (usersPickerBtn) usersPickerBtn.addEventListener('click', function (e) {
+            //stop this click from reaching the document-level "click outside closes it" listener
+            //below -- createLeaderboard() replaces the whole card synchronously, so by the time that
+            //listener runs, e.target is a detached node from the old DOM and would never match the
+            //freshly-rendered popover, making it look like an outside click and re-closing immediately
+            e.stopPropagation();
+            chartUsersPickerOpen = !chartUsersPickerOpen;
+            createLeaderboard();
+        });
+
+        document.querySelectorAll('#leaderboard .leaderboard-chart-users-option input').forEach(function (checkbox) {
+            checkbox.addEventListener('change', function () {
+                const name = checkbox.dataset.chartUser;
+                const current = new Set(usersForTrendChart().map(function (u) { return u.name; }));
+                if (checkbox.checked) {
+                    if (current.size >= trendChartPalette.length) { checkbox.checked = false; return; }
+                    current.add(name);
+                } else {
+                    if (current.size <= 1) { checkbox.checked = true; return; }
+                    current.delete(name);
+                }
+                trendChartSelectedUsers = Array.from(current);
+                saveToCache(CACHE_KEY_TREND_SELECTED_USERS, trendChartSelectedUsers);
+                createLeaderboard();
+            });
+        });
+
         if (showChartsPanel && (activeChartTab === 'seenTrend' || activeChartTab === 'burnTrend' || activeChartTab === 'levelTrend')) {
             attachLineTrendChartInteractivity();
         }
@@ -2818,7 +2977,20 @@
 
     //global, added once (not per-render, unlike the rest of createLeaderboard()'s listeners)
     document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape') { clearSelectedDeltaRange(); }
+        if (e.key !== 'Escape') { return; }
+        clearSelectedDeltaRange();
+        if (chartUsersPickerOpen) { chartUsersPickerOpen = false; createLeaderboard(); }
+    });
+
+    //global, added once -- closes the Users picker popover on any click outside it. The button's
+    //own click handler stops propagation, so this only ever sees genuine outside clicks.
+    document.addEventListener('click', function (e) {
+        if (!chartUsersPickerOpen) { return; }
+        const picker = document.querySelector('#leaderboard .leaderboard-chart-users-picker');
+        if (picker && !picker.contains(e.target)) {
+            chartUsersPickerOpen = false;
+            createLeaderboard();
+        }
     });
 
     startup();
