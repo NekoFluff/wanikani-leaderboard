@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wanikani Leaderboard 2 (2026 Fix)
 // @namespace    http://tampermonkey.net/
-// @version      3.2.0
+// @version      3.2.1
 // @description  Get levels from usernames and order them in a competitive list
 // @author       crazyfluff, faraplay, Dani2
 // @include      https://www.wanikani.com/dashboard
