@@ -1331,13 +1331,20 @@
             color: rgba(255, 255, 255, 0.85);
         }
 
+        #leaderboard .leaderboard-chart-header-controls {
+            display: flex;
+            align-items: center;
+            flex: none;
+            gap: 8px;
+        }
+
         #leaderboard .leaderboard-chart-range-toggle {
             display: inline-flex;
+            flex: none;
             border: 0.5px solid var(--lb-border);
             border-radius: 999px;
             padding: 2px;
             gap: 2px;
-            margin-bottom: 10px;
         }
 
         #leaderboard .leaderboard-chart-range-btn {
@@ -2145,9 +2152,11 @@
         return `<div class="leaderboard-chart">
             <div class="leaderboard-chart-header">
                 <div class="leaderboard-chart-legend">${legendHtml}</div>
-                ${modeToggleHtml}
+                <div class="leaderboard-chart-header-controls">
+                    ${modeToggleHtml}
+                    ${rangeToggleHtml}
+                </div>
             </div>
-            ${rangeToggleHtml}
             <div class="leaderboard-chart-svg-wrap">
                 <svg viewBox="0 0 ${width} ${height}" class="leaderboard-chart-canvas" preserveAspectRatio="none">
                     ${brushHtml}
