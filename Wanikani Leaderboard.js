@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wanikani Leaderboard 2 (2026 Fix)
 // @namespace    http://tampermonkey.net/
-// @version      3.2.1
+// @version      3.3.0
 // @description  Get levels from usernames and order them in a competitive list
 // @author       crazyfluff, faraplay, Dani2
 // @include      https://www.wanikani.com/dashboard
@@ -216,7 +216,7 @@
     var userSortingMethod = 'key1';
     var showChartsPanel = false;//whether the charts panel is expanded
     var activeChartTab = 'srsStages';//'srsStages' | 'seenTrend' | 'burnTrend' | 'levelTrend' -- which chart tab is showing
-    var trendValueMode = 'percent';//'percent' | 'count' -- burn%/seen% trend charts' %/# switch
+    var trendValueMode = 'count';//'percent' | 'count' -- burn/seen trend charts' %/# switch
     var trendWindowPreset = '1M';//'1M' | '3M' | '6M' | '1Y' | 'All' -- how far back the trend charts show
     //raw per-stage counts, not percentages, are stored -- burn%/seen% are derived at render time
     //against the current totalNumberOfWKItems (see percentOf), so historical points stay consistent
@@ -251,13 +251,16 @@
         return wkof.file_cache.load(key).catch(function () { return fallback; });
     }
 
-    //today's date as a local YYYY-MM-DD key (not toISOString, which is UTC and can
-    //land on the wrong side of midnight for the user's actual calendar day)
+    //a Date as a local YYYY-MM-DD key (not toISOString, which is UTC and can land on the wrong
+    //side of midnight for the user's actual calendar day)
+    function dateKeyFromDate(d) {
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${d.getFullYear()}-${month}-${day}`;
+    }
+
     function todayDateKey() {
-        const now = new Date();
-        const month = String(now.getMonth() + 1).padStart(2, '0');
-        const day = String(now.getDate()).padStart(2, '0');
-        return `${now.getFullYear()}-${month}-${day}`;
+        return dateKeyFromDate(new Date());
     }
 
     //records one snapshot per user per calendar day (refreshing multiple times in
@@ -331,7 +334,7 @@
     const trendChartPalette = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
 
     //how far back each trend-window preset reaches; 'All' has no cutoff
-    const TREND_WINDOW_DAYS = { '1M': 30, '3M': 90, '6M': 180, '1Y': 365, 'All': Infinity };
+    const TREND_WINDOW_DAYS = { '1W': 7, '1M': 30, '3M': 90, '6M': 180, '1Y': 365, 'All': Infinity };
 
     const accountNotFoundMessage = ' (Not Found)';
 
@@ -689,7 +692,7 @@
             createLeaderboard();
         });
 
-        loadFromCache(CACHE_KEY_TREND_VALUE_MODE, 'percent').then(function (result) {
+        loadFromCache(CACHE_KEY_TREND_VALUE_MODE, 'count').then(function (result) {
             trendValueMode = result;
             createLeaderboard();
         });
@@ -1237,12 +1240,6 @@
         }
 
         /* Burn% trend chart */
-        #leaderboard .leaderboard-chart-empty {
-            padding: 20px 4px;
-            font-size: 0.85em;
-            opacity: 0.6;
-            text-align: center;
-        }
 
         #leaderboard .leaderboard-chart-header {
             display: flex;
@@ -1525,6 +1522,19 @@
             flex: 0 0 auto;
             font-weight: 700;
             color: #333;
+        }
+
+        #leaderboard .leaderboard-chart-tooltip-cumulative {
+            flex: 0 0 auto;
+            font-size: 0.85em;
+        }
+
+        #leaderboard .leaderboard-chart-tooltip-cumulative--up {
+            color: #1a8a3d;
+        }
+
+        #leaderboard .leaderboard-chart-tooltip-cumulative--down {
+            color: #c62828;
         }
 
         /* Footer */
@@ -2037,19 +2047,157 @@
         return measured > 0 ? measured : 600;
     }
 
-    //generic line-over-time chart, one line per user (see usersForTrendChart), built from the daily
-    //snapshots recordProgressHistory() has been collecting. Seen%, Burn%, and Level are all just
-    //this with a different config -- see the wrappers below.
+    //------------------------------
+    // Trend chart shell -- pieces shared by the line chart (Level) and the bar+line delta chart
+    // (Seen/Burn): windowing the date list, the drag-to-compare brush overlay, gridlines, x-axis
+    // date labels, and the %/# and time-range toggles. Each returns a self-contained HTML chunk
+    // (or, for dates, the windowed/downsampled array) so both chart builders can share them without
+    // either owning the other's scale or marks.
+    //------------------------------
+
+    //builds the full calendar-day span for the selected preset (see trendWindowPreset), ending on
+    //the most recent date with any data, regardless of how far back real history actually reaches --
+    //so picking "1Y" always shows a full year of width, with the account's actual (shorter) history
+    //filling in from the right and the rest left as a gap, rather than the window silently shrinking
+    //to whatever data happens to exist. 'All' has no fixed span, so it just uses the real dates.
+    //
+    //Thinning is careful not to undo that: a naive step-based thin across the WHOLE span (mostly
+    //empty padding, for a young account) can land its sampling grid on the padding and skip the
+    //only day or two of real data entirely, leaving nothing to plot even though the window is
+    //technically full. So padding and real data are thinned separately -- real dates are kept whole
+    //as long as they fit the point budget, and only the leftover budget goes to thinning padding.
+    function windowAndDownsampleDates(allDates) {
+        if (allDates.length === 0) { return []; }
+        const windowDays = TREND_WINDOW_DAYS[trendWindowPreset] || 30;
+        if (!isFinite(windowDays)) { return downsampleDates(allDates, 60); }
+
+        const lastDate = new Date(allDates[allDates.length - 1] + 'T00:00:00');
+        const fullRange = [];
+        for (let i = windowDays - 1; i >= 0; i--) {
+            const d = new Date(lastDate);
+            d.setDate(d.getDate() - i);
+            fullRange.push(dateKeyFromDate(d));
+        }
+
+        const realDateSet = new Set(allDates);
+        const firstRealIndex = fullRange.findIndex(function (d) { return realDateSet.has(d); });
+        if (firstRealIndex <= 0) { return downsampleDates(fullRange, 60); }
+
+        const paddingPart = fullRange.slice(0, firstRealIndex);
+        const realPart = fullRange.slice(firstRealIndex);
+        if (realPart.length >= 60) {
+            //plenty of real data on its own -- thin it normally and drop the now-redundant padding
+            return downsampleDates(realPart, 60);
+        }
+        const thinnedPadding = downsampleDates(paddingPart, 60 - realPart.length);
+        return thinnedPadding.concat(realPart);
+    }
+
+    //rounds max up to a clean ceiling sized to its own order of magnitude (so this reads sensibly
+    //whether max is single-digit percentage points or four-digit item counts), then splits it into
+    //four even gridlines from 0
+    function niceGridlines(max) {
+        if (!(max > 0)) { return [0, 1, 2, 3, 4]; }
+        const magnitude = Math.pow(10, Math.floor(Math.log10(max)));
+        const niceMax = Math.ceil(max / magnitude) * magnitude;
+        return [0, 0.25, 0.5, 0.75, 1].map(function (f) { return Math.round(niceMax * f * 100) / 100; });
+    }
+
+    //the comparison range selected by dragging (see attachLineTrendChartInteractivity) is redrawn
+    //fresh on every render from selectedDeltaRange; the same rect/lines are also what the drag
+    //handlers reposition live while a drag is in progress
+    function buildBrushOverlayHtml(dates, xFor, plotTop, plotBottom) {
+        const startIdx = selectedDeltaRange ? dates.indexOf(selectedDeltaRange.start) : -1;
+        const endIdx = selectedDeltaRange ? dates.indexOf(selectedDeltaRange.end) : -1;
+        const hasBrush = startIdx !== -1 && endIdx !== -1;
+        const x1 = hasBrush ? xFor(Math.min(startIdx, endIdx)) : 0;
+        const x2 = hasBrush ? xFor(Math.max(startIdx, endIdx)) : 0;
+        const hiddenStyle = hasBrush ? '' : 'display:none';
+        const html = `<rect class="leaderboard-chart-brush-rect" x="${x1}" y="${plotTop}" width="${x2 - x1}" height="${plotBottom - plotTop}" style="${hiddenStyle}" />
+            <line class="leaderboard-chart-brush-line leaderboard-chart-brush-line--start" x1="${x1}" y1="${plotTop}" x2="${x1}" y2="${plotBottom}" style="${hiddenStyle}" />
+            <line class="leaderboard-chart-brush-line leaderboard-chart-brush-line--end" x1="${x2}" y1="${plotTop}" x2="${x2}" y2="${plotBottom}" style="${hiddenStyle}" />`;
+        return { html: html, hasBrush: hasBrush };
+    }
+
+    function buildGridlinesHtml(yGridlineValues, yFor, plotLeft, plotRight, formatValue) {
+        return yGridlineValues.map(function (value) {
+            const y = yFor(value);
+            return `<line class="leaderboard-chart-gridline" x1="${plotLeft}" y1="${y}" x2="${plotRight}" y2="${y}" />
+                <text class="leaderboard-chart-axis-label" x="${plotLeft - 6}" y="${y}" text-anchor="end" dominant-baseline="middle">${escapeHtml(formatValue(value))}</text>`;
+        }).join('');
+    }
+
+    function buildXAxisLabelsHtml(dates, xFor, height) {
+        const indices = Array.from(new Set([0, Math.floor((dates.length - 1) / 2), dates.length - 1]));
+        return indices.map(function (i) {
+            return `<text class="leaderboard-chart-axis-label" x="${xFor(i)}" y="${height - 8}" text-anchor="middle">${escapeHtml(formatShortDate(dates[i]))}</text>`;
+        }).join('');
+    }
+
+    function buildModeToggleHtml(showValueModeToggle) {
+        if (!showValueModeToggle) { return ''; }
+        return `<button type="button"
+            class="leaderboard-chart-mode-switch${trendValueMode === 'count' ? ' is-count' : ''}"
+            data-trend-mode="${trendValueMode === 'percent' ? 'count' : 'percent'}"
+            title="${trendValueMode === 'percent' ? 'Show as item count' : 'Show as percentage'}"
+            aria-label="Show as ${trendValueMode === 'percent' ? 'percentage' : 'item count'}"
+            aria-pressed="${trendValueMode === 'count'}">
+            <span class="leaderboard-chart-mode-switch-thumb"></span>
+            <span class="leaderboard-chart-mode-switch-label leaderboard-chart-mode-switch-label--percent">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.2"/><circle cx="17.5" cy="17.5" r="2.2"/></svg>
+            </span>
+            <span class="leaderboard-chart-mode-switch-label leaderboard-chart-mode-switch-label--count">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>
+            </span>
+        </button>`;
+    }
+
+    function buildRangeToggleHtml() {
+        return `<div class="leaderboard-chart-range-toggle" role="group" aria-label="Time range">
+            ${Object.keys(TREND_WINDOW_DAYS).map(function (preset) {
+            return `<button type="button" class="leaderboard-chart-range-btn${trendWindowPreset === preset ? ' is-active' : ''}" data-window-preset="${preset}">${preset}</button>`;
+        }).join('')}
+        </div>`;
+    }
+
+    //wraps a chart's marks/legend into the shared card shell (header with legend+toggles, svg with
+    //brush/gridlines/x-labels/marks/crosshair, tooltip, brush hint)
+    function buildTrendChartCardHtml(config) {
+        return `<div class="leaderboard-chart">
+            <div class="leaderboard-chart-header">
+                <div class="leaderboard-chart-legend">${config.legendHtml}</div>
+                <div class="leaderboard-chart-header-controls">
+                    ${buildModeToggleHtml(config.showValueModeToggle)}
+                    ${buildRangeToggleHtml()}
+                </div>
+            </div>
+            <div class="leaderboard-chart-svg-wrap">
+                <svg viewBox="0 0 ${config.width} ${config.height}" class="leaderboard-chart-canvas" preserveAspectRatio="none">
+                    ${config.brushHtml}
+                    ${config.gridlinesHtml}
+                    ${config.xLabelsHtml}
+                    ${config.marksHtml}
+                    <line class="leaderboard-chart-crosshair" x1="0" y1="${config.plotTop}" x2="0" y2="${config.plotBottom}" style="display:none" />
+                </svg>
+                <div class="leaderboard-chart-tooltip" style="display:none"></div>
+            </div>
+            <div class="leaderboard-chart-brush-hint" style="${config.hasBrush ? 'display:none' : ''}">${config.hasBrush ? '' : 'Drag across the chart to compare two dates'}</div>
+        </div>`;
+    }
+
+    //absolute-value line chart, one line per user (see usersForTrendChart), built from the daily
+    //snapshots recordProgressHistory() has been collecting. Currently only Level uses this -- Seen/
+    //Burn use buildDeltaTrendChartHtml instead, since an absolute line barely moves within any one
+    //window once an account is a few months old.
     //  valueFor(entry)        pulls the plotted number out of a snapshot; return undefined/non-number
     //                         for a snapshot that can't supply this metric (rendered as a gap)
     //  yMax/yGridlineValues   the Y scale and where its gridlines fall
     //  formatValue(v)         axis-label/tooltip text for a Y value
     //  deltaUnit              suffix (e.g. '%') for the tooltip's change-vs-previous-point badge
-    //  showValueModeToggle    whether to show the %/# switch (see trendValueMode) -- only burn/seen
-    //                         have a meaningful "raw count" alternative to their percentage
+    //  showValueModeToggle    whether to show the %/# switch (see trendValueMode)
     function buildLineTrendChartHtml(config) {
         const valueFor = config.valueFor, yMax = config.yMax, yGridlineValues = config.yGridlineValues,
-            formatValue = config.formatValue, emptyMessage = config.emptyMessage, deltaUnit = config.deltaUnit,
+            formatValue = config.formatValue, deltaUnit = config.deltaUnit,
             showValueModeToggle = config.showValueModeToggle;
         const trackedUsers = usersForTrendChart();
         const allDates = Array.from(new Set(
@@ -2058,16 +2206,13 @@
                 return acc;
             }, [])
         )).sort();
+        const dates = windowAndDownsampleDates(allDates);
 
-        //cap to the selected window (see trendWindowPreset), then thin long windows so the line
-        //stays readable rather than a dense scribble of daily points
-        const windowDays = TREND_WINDOW_DAYS[trendWindowPreset] || 30;
-        const windowedDates = isFinite(windowDays) ? allDates.slice(-windowDays) : allDates;
-        const dates = downsampleDates(windowedDates, 60);
-
+        //no history at all yet (before the very first snapshot) -- nothing to plot, and dates.length
+        //feeds xFor's denominator below, so this also guards against a divide-by-zero
         if (dates.length < 2) {
             lastLineTrendChart = null;
-            return `<div class="leaderboard-chart-empty">${escapeHtml(emptyMessage)}</div>`;
+            return '';
         }
 
         const width = measuredChartWidth(), height = 190;
@@ -2075,29 +2220,12 @@
         const xFor = function (i) { return plotLeft + (i / (dates.length - 1)) * (plotRight - plotLeft); };
         const yFor = function (value) { return plotBottom - (Math.min(Math.max(value, 0), yMax) / yMax) * (plotBottom - plotTop); };
 
-        //the comparison range selected by dragging (see attachLineTrendChartInteractivity) is
-        //redrawn fresh on every render from selectedDeltaRange; the same rect/lines are also
-        //what the drag handlers reposition live while a drag is in progress
-        const brushDates = selectedDeltaRange ? [dates.indexOf(selectedDeltaRange.start), dates.indexOf(selectedDeltaRange.end)] : [-1, -1];
-        const hasBrush = brushDates[0] !== -1 && brushDates[1] !== -1;
-        const brushX1 = hasBrush ? xFor(Math.min(brushDates[0], brushDates[1])) : 0;
-        const brushX2 = hasBrush ? xFor(Math.max(brushDates[0], brushDates[1])) : 0;
-        const brushHiddenStyle = hasBrush ? '' : 'display:none';
-        const brushHtml = `<rect class="leaderboard-chart-brush-rect" x="${brushX1}" y="${plotTop}" width="${brushX2 - brushX1}" height="${plotBottom - plotTop}" style="${brushHiddenStyle}" />
-            <line class="leaderboard-chart-brush-line leaderboard-chart-brush-line--start" x1="${brushX1}" y1="${plotTop}" x2="${brushX1}" y2="${plotBottom}" style="${brushHiddenStyle}" />
-            <line class="leaderboard-chart-brush-line leaderboard-chart-brush-line--end" x1="${brushX2}" y1="${plotTop}" x2="${brushX2}" y2="${plotBottom}" style="${brushHiddenStyle}" />`;
+        const brush = buildBrushOverlayHtml(dates, xFor, plotTop, plotBottom);
+        const gridlinesHtml = buildGridlinesHtml(yGridlineValues, yFor, plotLeft, plotRight, formatValue);
+        const xLabelsHtml = buildXAxisLabelsHtml(dates, xFor, height);
 
-        const gridlinesHtml = yGridlineValues.map(function (value) {
-            const y = yFor(value);
-            return `<line class="leaderboard-chart-gridline" x1="${plotLeft}" y1="${y}" x2="${plotRight}" y2="${y}" />
-                <text class="leaderboard-chart-axis-label" x="${plotLeft - 6}" y="${y}" text-anchor="end" dominant-baseline="middle">${escapeHtml(formatValue(value))}</text>`;
-        }).join('');
-
-        const xLabelIndices = Array.from(new Set([0, Math.floor((dates.length - 1) / 2), dates.length - 1]));
-        const xLabelsHtml = xLabelIndices.map(function (i) {
-            return `<text class="leaderboard-chart-axis-label" x="${xFor(i)}" y="${height - 8}" text-anchor="middle">${escapeHtml(formatShortDate(dates[i]))}</text>`;
-        }).join('');
-
+        //a user with just one real point still renders (as a lone end-dot, no line segment --
+        //there's nothing wrong with that) so there's no separate "not enough data" gate here
         const series = trackedUsers.map(function (user, index) {
             const color = trendChartPalette[index % trendChartPalette.length];
             const byDate = {};
@@ -2113,9 +2241,25 @@
             return { name: user.name, color: color, points: points };
         }).filter(function (series) { return series.points.length > 0; });
 
-        lastLineTrendChart = { dates: dates, xFor: xFor, plotTop: plotTop, plotBottom: plotBottom, series: series, formatValue: formatValue, deltaUnit: deltaUnit };
+        const tooltipRowsFor = function (date) {
+            return series.map(function (s) {
+                const pointIndex = s.points.findIndex(function (p) { return p.date === date; });
+                if (pointIndex === -1) { return ''; }
+                const point = s.points[pointIndex];
+                const previousPoint = pointIndex > 0 ? s.points[pointIndex - 1] : null;
+                const delta = previousPoint ? Math.round((point.value - previousPoint.value) * 100) / 100 : null;
+                return `<div class="leaderboard-chart-tooltip-row">
+                    <span class="leaderboard-chart-tooltip-swatch" style="background:${s.color}"></span>
+                    <span class="leaderboard-chart-tooltip-name">${escapeHtml(s.name)}</span>
+                    <span class="leaderboard-chart-tooltip-value">${escapeHtml(formatValue(point.value))}</span>
+                    ${deltaBadgeHtml(delta, deltaUnit)}
+                </div>`;
+            }).join('');
+        };
 
-        const linesHtml = series.map(function (s) {
+        lastLineTrendChart = { dates: dates, xFor: xFor, plotTop: plotTop, plotBottom: plotBottom, tooltipRowsFor: tooltipRowsFor };
+
+        const marksHtml = series.map(function (s) {
             const pathD = s.points.map(function (p, idx) { return (idx === 0 ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1); }).join(' ');
             const lastPoint = s.points[s.points.length - 1];
             return `<path class="leaderboard-chart-line" stroke="${s.color}" d="${pathD}" fill="none" />
@@ -2128,91 +2272,138 @@
             </span>`;
         }).join('');
 
-        const modeToggleHtml = showValueModeToggle ? `<button type="button"
-            class="leaderboard-chart-mode-switch${trendValueMode === 'count' ? ' is-count' : ''}"
-            data-trend-mode="${trendValueMode === 'percent' ? 'count' : 'percent'}"
-            title="${trendValueMode === 'percent' ? 'Show as item count' : 'Show as percentage'}"
-            aria-label="Show as ${trendValueMode === 'percent' ? 'percentage' : 'item count'}"
-            aria-pressed="${trendValueMode === 'count'}">
-            <span class="leaderboard-chart-mode-switch-thumb"></span>
-            <span class="leaderboard-chart-mode-switch-label leaderboard-chart-mode-switch-label--percent">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.2"/><circle cx="17.5" cy="17.5" r="2.2"/></svg>
-            </span>
-            <span class="leaderboard-chart-mode-switch-label leaderboard-chart-mode-switch-label--count">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>
-            </span>
-        </button>` : '';
-
-        const rangeToggleHtml = `<div class="leaderboard-chart-range-toggle" role="group" aria-label="Time range">
-            ${Object.keys(TREND_WINDOW_DAYS).map(function (preset) {
-            return `<button type="button" class="leaderboard-chart-range-btn${trendWindowPreset === preset ? ' is-active' : ''}" data-window-preset="${preset}">${preset}</button>`;
-        }).join('')}
-        </div>`;
-
-        return `<div class="leaderboard-chart">
-            <div class="leaderboard-chart-header">
-                <div class="leaderboard-chart-legend">${legendHtml}</div>
-                <div class="leaderboard-chart-header-controls">
-                    ${modeToggleHtml}
-                    ${rangeToggleHtml}
-                </div>
-            </div>
-            <div class="leaderboard-chart-svg-wrap">
-                <svg viewBox="0 0 ${width} ${height}" class="leaderboard-chart-canvas" preserveAspectRatio="none">
-                    ${brushHtml}
-                    ${gridlinesHtml}
-                    ${xLabelsHtml}
-                    ${linesHtml}
-                    <line class="leaderboard-chart-crosshair" x1="0" y1="${plotTop}" x2="0" y2="${plotBottom}" style="display:none" />
-                </svg>
-                <div class="leaderboard-chart-tooltip" style="display:none"></div>
-            </div>
-            <div class="leaderboard-chart-brush-hint" style="${hasBrush ? 'display:none' : ''}">${hasBrush ? '' : 'Drag across the chart to compare two dates'}</div>
-        </div>`;
+        return buildTrendChartCardHtml({
+            width: width, height: height, plotTop: plotTop, plotBottom: plotBottom,
+            brushHtml: brush.html, hasBrush: brush.hasBrush,
+            gridlinesHtml: gridlinesHtml, xLabelsHtml: xLabelsHtml, marksHtml: marksHtml,
+            legendHtml: legendHtml, showValueModeToggle: showValueModeToggle,
+        });
     }
 
-    const trendNoHistoryMessage = 'Come back after a couple more refreshes on different days — the trend chart needs at least two days of history to draw a line.';
+    //bar+line trend chart for burn/seen: bars show the tracked group's COMBINED day-to-day change
+    //(context -- how active was everyone that period), while one colored line per user shows their
+    //OWN cumulative change since the left edge of the visible window. Unlike an absolute-value
+    //line, this stays readable for a mature account: it's rebased to 0 at the window start instead
+    //of starting near whatever total the account has already accumulated, so real movement doesn't
+    //get lost against a near-flat, already-high baseline. rawValueFor(entry) pulls the raw count out
+    //of a snapshot; trendValueMode's %/# switch decides whether deltas are shown in percentage
+    //points of all WK items or raw item counts, same as the absolute chart it replaced.
+    function buildDeltaTrendChartHtml(rawValueFor) {
+        const trackedUsers = usersForTrendChart();
+        const allDates = Array.from(new Set(
+            trackedUsers.reduce(function (acc, user) {
+                (progressHistory[user.name] || []).forEach(function (entry) { acc.push(entry.date); });
+                return acc;
+            }, [])
+        )).sort();
+        const dates = windowAndDownsampleDates(allDates);
 
-    //four evenly-spaced gridline values from 0 to max, rounded to the nearest 100 for a readable axis
-    function quarterGridlines(max) {
-        return [0, 0.25, 0.5, 0.75, 1].map(function (fraction) { return Math.round(max * fraction / 100) * 100; });
-    }
-
-    //shared by the burn%/seen% trend charts, which can each show either % of all WK items or the
-    //raw item count (see trendValueMode -- toggled via the chart's own %/# switch). rawValueFor
-    //pulls the raw count out of a snapshot; percentOf() derives the percentage from it on demand.
-    function buildPercentOrCountTrendChartHtml(rawValueFor) {
-        if (trendValueMode === 'count') {
-            return buildLineTrendChartHtml({
-                valueFor: rawValueFor,
-                yMax: totalNumberOfWKItems,
-                yGridlineValues: quarterGridlines(totalNumberOfWKItems),
-                formatValue: function (v) { return Math.round(v).toLocaleString(); },
-                emptyMessage: trendNoHistoryMessage,
-                deltaUnit: '',
-                showValueModeToggle: true,
-            });
+        //no history at all yet -- nothing to plot, and dates.length feeds xFor's denominator
+        //below, so this also guards against a divide-by-zero
+        if (dates.length < 2) {
+            lastLineTrendChart = null;
+            return '';
         }
-        return buildLineTrendChartHtml({
-            valueFor: function (entry) {
+
+        const isCount = trendValueMode === 'count';
+        const rawToUnit = isCount ? function (raw) { return raw; } : function (raw) { return percentOf(raw, totalNumberOfWKItems); };
+        const formatAxisValue = isCount ? function (v) { return Math.round(v).toLocaleString(); } : function (v) { return v + '%'; };
+        const formatDeltaValue = isCount
+            ? function (v) { return (v >= 0 ? '+' : '') + Math.round(v).toLocaleString(); }
+            : function (v) { return (v >= 0 ? '+' : '') + v + '%'; };
+
+        //per user: raw values at each plotted date -> consecutive deltas -> running cumulative sum.
+        //The date immediately before the window is looked up too, purely as a delta baseline for
+        //dates[0] -- without it, the window's own first date has no earlier point to diff against
+        //and silently gets consumed as a throwaway reference instead of plotting its own value.
+        const dayBeforeWindow = new Date(dates[0] + 'T00:00:00');
+        dayBeforeWindow.setDate(dayBeforeWindow.getDate() - 1);
+        const dayBeforeWindowKey = dateKeyFromDate(dayBeforeWindow);
+
+        const perUser = trackedUsers.map(function (user, index) {
+            const color = trendChartPalette[index % trendChartPalette.length];
+            const byDate = {};
+            (progressHistory[user.name] || []).forEach(function (entry) {
                 const raw = rawValueFor(entry);
-                return typeof raw === 'number' ? percentOf(raw, totalNumberOfWKItems) : undefined;
-            },
-            yMax: 100,
-            yGridlineValues: [0, 25, 50, 75, 100],
-            formatValue: function (v) { return v + '%'; },
-            emptyMessage: trendNoHistoryMessage,
-            deltaUnit: '%',
-            showValueModeToggle: true,
+                if (typeof raw === 'number') { byDate[entry.date] = rawToUnit(raw); }
+            });
+
+            const rawPoints = [];
+            if (Object.prototype.hasOwnProperty.call(byDate, dayBeforeWindowKey)) {
+                rawPoints.push({ i: -1, date: dayBeforeWindowKey, value: byDate[dayBeforeWindowKey] });
+            }
+            dates.forEach(function (date, i) {
+                if (Object.prototype.hasOwnProperty.call(byDate, date)) { rawPoints.push({ i: i, date: date, value: byDate[date] }); }
+            });
+
+            const deltaPoints = [];
+            let cumulative = 0;
+            for (let k = 1; k < rawPoints.length; k++) {
+                const delta = Math.round((rawPoints[k].value - rawPoints[k - 1].value) * 100) / 100;
+                cumulative = Math.round((cumulative + delta) * 100) / 100;
+                deltaPoints.push({ i: rawPoints[k].i, date: rawPoints[k].date, delta: delta, cumulative: cumulative });
+            }
+            return { name: user.name, color: color, deltaPoints: deltaPoints };
+        }).filter(function (u) { return u.deltaPoints.length > 0; });
+
+        const cumulativeValues = [];
+        perUser.forEach(function (u) { u.deltaPoints.forEach(function (p) { cumulativeValues.push(p.cumulative); }); });
+
+        const scaleMax = Math.max(1, cumulativeValues.reduce(function (m, v) { return Math.max(m, Math.abs(v)); }, 0));
+        const yGridlineValues = niceGridlines(scaleMax);
+        const yMax = yGridlineValues[yGridlineValues.length - 1];
+
+        const width = measuredChartWidth(), height = 190;
+        const plotLeft = 34, plotRight = width - 12, plotTop = 12, plotBottom = height - 26;
+        const xFor = function (i) { return plotLeft + (i / (dates.length - 1)) * (plotRight - plotLeft); };
+        const yFor = function (value) { return plotBottom - (Math.min(Math.max(value, 0), yMax) / yMax) * (plotBottom - plotTop); };
+
+        const brush = buildBrushOverlayHtml(dates, xFor, plotTop, plotBottom);
+        const gridlinesHtml = buildGridlinesHtml(yGridlineValues, yFor, plotLeft, plotRight, formatAxisValue);
+        const xLabelsHtml = buildXAxisLabelsHtml(dates, xFor, height);
+
+        const linesHtml = perUser.map(function (u) {
+            const pathD = u.deltaPoints.map(function (p, idx) { return (idx === 0 ? 'M' : 'L') + xFor(p.i).toFixed(1) + ',' + yFor(p.cumulative).toFixed(1); }).join(' ');
+            const last = u.deltaPoints[u.deltaPoints.length - 1];
+            return `<path class="leaderboard-chart-line" stroke="${u.color}" d="${pathD}" fill="none" />
+                <circle class="leaderboard-chart-end-dot" cx="${xFor(last.i).toFixed(1)}" cy="${yFor(last.cumulative).toFixed(1)}" r="4" fill="${u.color}" />`;
+        }).join('');
+
+        const legendHtml = perUser.map(function (u) {
+            return `<span class="leaderboard-chart-legend-item">
+                <span class="leaderboard-chart-legend-swatch" style="background:${u.color}"></span>${escapeHtml(u.name)}
+            </span>`;
+        }).join('');
+
+        const tooltipRowsFor = function (date) {
+            return perUser.map(function (u) {
+                const p = u.deltaPoints.find(function (pt) { return pt.date === date; });
+                if (!p) { return ''; }
+                return `<div class="leaderboard-chart-tooltip-row">
+                    <span class="leaderboard-chart-tooltip-swatch" style="background:${u.color}"></span>
+                    <span class="leaderboard-chart-tooltip-name">${escapeHtml(u.name)}</span>
+                    <span class="leaderboard-chart-tooltip-value">${escapeHtml(formatDeltaValue(p.delta))}</span>
+                    <span class="leaderboard-chart-tooltip-cumulative leaderboard-chart-tooltip-cumulative--${p.cumulative >= 0 ? 'up' : 'down'}">Σ ${escapeHtml(formatDeltaValue(p.cumulative))}</span>
+                </div>`;
+            }).join('');
+        };
+
+        lastLineTrendChart = { dates: dates, xFor: xFor, plotTop: plotTop, plotBottom: plotBottom, tooltipRowsFor: tooltipRowsFor };
+
+        return buildTrendChartCardHtml({
+            width: width, height: height, plotTop: plotTop, plotBottom: plotBottom,
+            brushHtml: brush.html, hasBrush: brush.hasBrush,
+            gridlinesHtml: gridlinesHtml, xLabelsHtml: xLabelsHtml, marksHtml: linesHtml,
+            legendHtml: legendHtml, showValueModeToggle: true,
         });
     }
 
     function buildBurnTrendChartHtml() {
-        return buildPercentOrCountTrendChartHtml(function (entry) { return typeof entry.burn === 'number' ? entry.burn : undefined; });
+        return buildDeltaTrendChartHtml(function (entry) { return typeof entry.burn === 'number' ? entry.burn : undefined; });
     }
 
     function buildSeenTrendChartHtml() {
-        return buildPercentOrCountTrendChartHtml(seenTotalFromHistoryEntry);
+        return buildDeltaTrendChartHtml(seenTotalFromHistoryEntry);
     }
 
     function buildLevelTrendChartHtml() {
@@ -2221,7 +2412,6 @@
             yMax: 60,
             yGridlineValues: [0, 15, 30, 45, 60],
             formatValue: function (v) { return String(v); },
-            emptyMessage: trendNoHistoryMessage,
             deltaUnit: '',
             showValueModeToggle: false,
         });
@@ -2260,19 +2450,7 @@
             crosshair.style.display = '';
 
             const date = chart.dates[index];
-            const rowsHtml = chart.series.map(function (s) {
-                const pointIndex = s.points.findIndex(function (p) { return p.date === date; });
-                if (pointIndex === -1) { return ''; }
-                const point = s.points[pointIndex];
-                const previousPoint = pointIndex > 0 ? s.points[pointIndex - 1] : null;
-                const delta = previousPoint ? Math.round((point.value - previousPoint.value) * 100) / 100 : null;
-                return `<div class="leaderboard-chart-tooltip-row">
-                    <span class="leaderboard-chart-tooltip-swatch" style="background:${s.color}"></span>
-                    <span class="leaderboard-chart-tooltip-name">${escapeHtml(s.name)}</span>
-                    <span class="leaderboard-chart-tooltip-value">${escapeHtml(chart.formatValue(point.value))}</span>
-                    ${deltaBadgeHtml(delta, chart.deltaUnit)}
-                </div>`;
-            }).join('');
+            const rowsHtml = chart.tooltipRowsFor(date);
             tooltip.innerHTML = `<div class="leaderboard-chart-tooltip-date">${escapeHtml(formatShortDate(date))}</div>${rowsHtml}`;
 
             const wrapRect = svg.parentElement.getBoundingClientRect();
@@ -2362,8 +2540,8 @@
     function buildChartsPanelHtml() {
         const tabs = [
             { key: 'srsStages', label: 'SRS Stages' },
-            { key: 'seenTrend', label: 'Seen %' },
-            { key: 'burnTrend', label: 'Burn %' },
+            { key: 'seenTrend', label: 'Seen' },
+            { key: 'burnTrend', label: 'Burned' },
             { key: 'levelTrend', label: 'Level' },
         ];
         const tabsHtml = tabs.map(function (tab) {
@@ -2471,7 +2649,7 @@
                             <th></th>
                             <th>User</th>
                             <th class="leaderboard-col-seen">Seen</th>
-                            <th class="leaderboard-col-burn">Burn</th>
+                            <th class="leaderboard-col-burn">Burned</th>
                             <th class="leaderboard-col-actions"></th>
                         </tr>
                     </thead>
