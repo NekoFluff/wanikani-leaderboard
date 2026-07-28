@@ -975,10 +975,6 @@
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
-            /* overflow:hidden clips to the line box, and this inherits WK's own (tighter than the
-               font needs) line-height -- too short a box crops descenders (g/q/y/j) even though the
-               text itself never wraps. line-height:1.3 matches the realm badge above and gives the
-               glyphs' full vertical extent room inside the clipped box. */
             line-height: 1.3;
         }
 
@@ -1238,6 +1234,7 @@
             white-space: nowrap;
             font-size: 0.85em;
             font-weight: 600;
+            line-height: 1.3;
         }
 
         #leaderboard .leaderboard-srs-row-bar-track {
@@ -1620,6 +1617,7 @@
             text-overflow: ellipsis;
             white-space: nowrap;
             color: #666;
+            line-height: 1.3;
         }
 
         #leaderboard .leaderboard-chart-tooltip-value {
