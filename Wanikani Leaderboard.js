@@ -354,7 +354,7 @@
     //resolves, or if it fails.
     let totalNumberOfWKItems = 8910;
 
-    var usersThatLeveledUp = '';
+    var usersThatLeveledUp = [];//{name, from, to}[], accumulated across one refresh, flushed by showLevelUps()
 
     //------------------------------
     // Get user information (name, level, avatar, realm)
@@ -555,87 +555,93 @@
         const previousSrsTotal = srsStageTotal(item);
         const hadPriorData = item.wasUserFound;
 
-        let xmlhttp;
         let userLevel = 0;
         let userAvatarUrl = '';
-        let srsCountsLabeled = [];
+        //[{}] rather than [] -- totalBurnPercentage below always reads srsCountsLabeled[0], and a
+        //genuinely empty array would throw there for a fetch that failed or came back non-OK
+        let srsCountsLabeled = [{}];
         let hasUserLeveledUp = false;
         let userFound = false;
 
-        if (window.XMLHttpRequest) {// code for IE7+, Firefox, Chrome, Opera, Safari
-            xmlhttp = new XMLHttpRequest();
+        //fetch() instead of the synchronous XHR this replaced: a synchronous request blocks the
+        //whole tab for as long as the network takes, and since JS is single-threaded that stalls
+        //every other in-flight user's request too (processArray's Promise.all only LOOKED parallel;
+        //each synchronous .send() froze everything until it returned). fetch() actually yields, so
+        //requests interleave properly and the tab stays responsive during a refresh.
+        try {
+            const response = await fetch('/users/' + item.name);
+            if (response.ok) {
+                const responseText = await response.text();
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(responseText, 'text/html');
 
-            xmlhttp.onreadystatechange = function () {
-                if (xmlhttp.readyState == 4 && xmlhttp.status == 200) {
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(xmlhttp.responseText, 'text/html');
+                //a nonexistent username redirects to the dashboard, so the parsed title won't
+                //start with the profile prefix (or the trailing name won't match) in that case
+                const profileTitlePrefix = 'WaniKani / Profile / ';
+                const pageUserName = doc.title.startsWith(profileTitlePrefix)
+                    ? doc.title.slice(profileTitlePrefix.length)
+                    : '';
 
-                    //a nonexistent username redirects to the dashboard, so the parsed title won't
-                    //start with the profile prefix (or the trailing name won't match) in that case
-                    const profileTitlePrefix = 'WaniKani / Profile / ';
-                    const pageUserName = doc.title.startsWith(profileTitlePrefix)
-                        ? doc.title.slice(profileTitlePrefix.length)
-                        : '';
+                if (pageUserName.toLowerCase() === item.name.toLowerCase()) {
+                    const levelEl = doc.querySelector('.public-profile__level-info-level');
+                    const levelMatch = levelEl ? levelEl.textContent.match(/\d+/) : null;
+                    if (!levelMatch) {
+                        console.error('Could not find level for user ' + item.name);
+                    }
+                    userLevel = levelMatch ? Number(levelMatch[0]) : 0;
 
-                    if (pageUserName.toLowerCase() === item.name.toLowerCase()) {
-                        const levelEl = doc.querySelector('.public-profile__level-info-level');
-                        const levelMatch = levelEl ? levelEl.textContent.match(/\d+/) : null;
-                        if (!levelMatch) {
-                            console.error('Could not find level for user ' + item.name);
+                    const avatarEl = doc.querySelector('.public-profile__avatar wk-profile-image');
+                    if (!avatarEl) {
+                        console.error('Could not find avatar for user ' + item.name);
+                    }
+                    userAvatarUrl = avatarEl ? avatarEl.getAttribute('src') : defaultAvatarUrl;
+
+                    //check to see if user is already on the leaderboards
+                    let found = usersInfoList.find(function (element) {
+                        return element.name === pageUserName.toLowerCase();
+                    });
+                    if (found !== undefined) {
+                        //check to see if user has leveled up, so we can display that later
+                        if (found.level < userLevel && found.level != 0) {
+                            usersThatLeveledUp.push({ name: found.name, from: found.level, to: userLevel });
+                            hasUserLeveledUp = true;
                         }
-                        userLevel = levelMatch ? Number(levelMatch[0]) : 0;
-
-                        const avatarEl = doc.querySelector('.public-profile__avatar wk-profile-image');
-                        if (!avatarEl) {
-                            console.error('Could not find avatar for user ' + item.name);
-                        }
-                        userAvatarUrl = avatarEl ? avatarEl.getAttribute('src') : defaultAvatarUrl;
-
-                        //check to see if user is already on the leaderboards
-                        let found = usersInfoList.find(function (element) {
-                            return element.name === pageUserName.toLowerCase();
-                        });
-                        if (found !== undefined) {
-                            //check to see if user has leveled up, so we can display that later
-                            if (found.level < userLevel && found.level != 0) {
-                                usersThatLeveledUp += found.name + ' ' + found.level + ' -> ' + userLevel + ', \n';
-                                hasUserLeveledUp = true;
-                            }
-                        }
-
-                        userFound = true;
-                    } else { //a wanikani profile page didn't exist for this username and we got redirected to dashboard
-                        userLevel = -1;
-                        userAvatarUrl = defaultAvatarUrl;
-                        userFound = false;
                     }
 
-                    // Find all item spread table rows
-                    const rows = doc.querySelectorAll('.item-spread-table-row');
-
-                    const obj = {};
-                    const srsPrefixes = ['appr', 'guru', 'master', 'enlight', 'burn'];
-
-                    rows.forEach((row, index) => {
-                        if (index >= srsPrefixes.length) return;
-
-                        const counts = row.querySelectorAll('.item-spread-table-row__count');
-                        const total = row.querySelector('.item-spread-table-row__total');
-
-                        if (counts.length >= 3) {
-                            const prefix = srsPrefixes[index];
-                            obj[prefix + 'Rad'] = parseInt(counts[0].textContent.trim()) || 0;
-                            obj[prefix + 'Kan'] = parseInt(counts[1].textContent.trim()) || 0;
-                            obj[prefix + 'Voc'] = parseInt(counts[2].textContent.trim()) || 0;
-                            obj[prefix + 'Total'] = parseInt(total?.textContent.trim()) || 0;
-                        }
-                    });
-
-                    srsCountsLabeled.push(obj);
+                    userFound = true;
+                } else { //a wanikani profile page didn't exist for this username and we got redirected to dashboard
+                    userLevel = -1;
+                    userAvatarUrl = defaultAvatarUrl;
+                    userFound = false;
                 }
+
+                // Find all item spread table rows
+                const rows = doc.querySelectorAll('.item-spread-table-row');
+
+                const obj = {};
+                const srsPrefixes = ['appr', 'guru', 'master', 'enlight', 'burn'];
+
+                rows.forEach((row, index) => {
+                    if (index >= srsPrefixes.length) return;
+
+                    const counts = row.querySelectorAll('.item-spread-table-row__count');
+                    const total = row.querySelector('.item-spread-table-row__total');
+
+                    if (counts.length >= 3) {
+                        const prefix = srsPrefixes[index];
+                        obj[prefix + 'Rad'] = parseInt(counts[0].textContent.trim()) || 0;
+                        obj[prefix + 'Kan'] = parseInt(counts[1].textContent.trim()) || 0;
+                        obj[prefix + 'Voc'] = parseInt(counts[2].textContent.trim()) || 0;
+                        obj[prefix + 'Total'] = parseInt(total?.textContent.trim()) || 0;
+                    }
+                });
+
+                srsCountsLabeled = [obj];
             }
-            xmlhttp.open("GET", '/users/' + item.name, false);
-            xmlhttp.send();
+        } catch (e) {
+            //network failure (offline, DNS, etc.) -- leave the defaults above so this user's row
+            //just shows as not-found rather than rejecting the whole Promise.all in processArray()
+            console.error('Failed to fetch profile for user ' + item.name, e);
         }
 
         item.level = userLevel;//assign level
@@ -653,12 +659,13 @@
     }
 
     function showLevelUps() {
-        if (usersThatLeveledUp != '') {
-            usersThatLeveledUp = usersThatLeveledUp.substring(0, usersThatLeveledUp.length - 3);//remove the ', '
-
-            notify('The following user(s) leveled up:', usersThatLeveledUp);
-            usersThatLeveledUp = '';
-        }
+        if (usersThatLeveledUp.length === 0) { return; }
+        //alphabetical rather than "whichever fetch happened to resolve first" -- request order is
+        //no longer meaningful now that these run concurrently instead of one-at-a-time
+        const sorted = usersThatLeveledUp.slice().sort(function (a, b) { return a.name.localeCompare(b.name, 'en'); });
+        const detail = sorted.map(function (u) { return u.name + ' ' + u.from + ' -> ' + u.to; }).join('\n');
+        notify('The following user(s) leveled up:', detail);
+        usersThatLeveledUp = [];
     }
 
     async function processArray() {
