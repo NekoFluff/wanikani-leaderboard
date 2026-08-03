@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wanikani Leaderboard 2 (2026 Fix)
 // @namespace    http://tampermonkey.net/
-// @version      3.4.2
+// @version      3.4.3
 // @description  Get levels from usernames and order them in a competitive list
 // @author       crazyfluff, faraplay, Dani2
 // @include      https://www.wanikani.com/dashboard
@@ -2053,9 +2053,17 @@
     //points for burn, raw item count for seen), just computed between the range's two endpoints
     //instead of between refreshes. Returns null (no range active) or an object with a null field
     //for any metric missing a snapshot at either endpoint -- deltaBadgeHtml already hides those.
+    //
+    //The baseline snapshot is taken from the day BEFORE the range's start date, not the start date
+    //itself -- mirroring how the trend chart treats its own leftmost point (see dayBeforeWindow in
+    //buildDeltaTrendChartHtml). Diffing directly against the start-date snapshot would exclude that
+    //day's own gain (its snapshot already reflects everything learned up through that day), so the
+    //range would silently come up one day short of what the chart's per-day deltas sum to.
     function rangeDeltasFor(user) {
         if (!selectedDeltaRange) { return null; }
-        const startEntry = nearestHistoryEntryFor(user.name, selectedDeltaRange.start);
+        const dayBeforeStart = new Date(selectedDeltaRange.start + 'T00:00:00');
+        dayBeforeStart.setDate(dayBeforeStart.getDate() - 1);
+        const startEntry = nearestHistoryEntryFor(user.name, dateKeyFromDate(dayBeforeStart));
         const endEntry = nearestHistoryEntryFor(user.name, selectedDeltaRange.end);
         if (!startEntry || !endEntry) { return { levelDelta: null, burnDelta: null, seenDelta: null }; }
 
