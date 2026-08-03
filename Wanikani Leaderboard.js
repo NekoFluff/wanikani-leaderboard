@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wanikani Leaderboard 2 (2026 Fix)
 // @namespace    http://tampermonkey.net/
-// @version      3.4.3
+// @version      3.5.0
 // @description  Get levels from usernames and order them in a competitive list
 // @author       crazyfluff, faraplay, Dani2
 // @include      https://www.wanikani.com/dashboard
@@ -2706,8 +2706,17 @@
             svg.releasePointerCapture(pointerEvent.pointerId);
             const endIndex = nearestDateIndex(pointerToViewBoxX(pointerEvent));
             if (endIndex === dragStartIndex) {
-                //no real drag happened -- treat it as a click that dismisses any existing selection
-                clearSelectedDeltaRange();
+                //no real drag happened -- a plain click on a single date. Clicking the already-
+                //selected date again dismisses the selection (see the banner's clear button for the
+                //other way to do that); otherwise select just that one date, so the table shows that
+                //day's own gain instead of requiring a drag across two dates.
+                const clickedDate = chart.dates[dragStartIndex];
+                if (selectedDeltaRange && selectedDeltaRange.start === clickedDate && selectedDeltaRange.end === clickedDate) {
+                    clearSelectedDeltaRange();
+                } else {
+                    selectedDeltaRange = { start: clickedDate, end: clickedDate };
+                    createLeaderboard();
+                }
                 return;
             }
             const lo = Math.min(dragStartIndex, endIndex), hi = Math.max(dragStartIndex, endIndex);
@@ -2820,8 +2829,11 @@
                 <button type="button" class="leaderboard-empty-add-btn">Add a user</button>
             </div>`;
         } else {
+            const rangeBannerText = selectedDeltaRange && selectedDeltaRange.start === selectedDeltaRange.end
+                ? `Showing ${formatShortDate(selectedDeltaRange.start)}`
+                : selectedDeltaRange ? `Comparing ${formatShortDate(selectedDeltaRange.start)} → ${formatShortDate(selectedDeltaRange.end)}` : '';
             const rangeBannerHtml = selectedDeltaRange ? `<div class="leaderboard-range-banner">
-                <span>Comparing ${escapeHtml(formatShortDate(selectedDeltaRange.start))} → ${escapeHtml(formatShortDate(selectedDeltaRange.end))}</span>
+                <span>${escapeHtml(rangeBannerText)}</span>
                 <button type="button" class="leaderboard-range-clear" title="Clear comparison range">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
                 </button>
